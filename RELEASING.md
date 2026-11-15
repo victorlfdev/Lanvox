@@ -33,14 +33,16 @@ Formato `x.y.z`, só números (o app ignora versões com sufixo, como `0.2.0-bet
 1. Aumente `version` em `app/Cargo.toml` seguindo a política acima e faça commit.
 2. Crie e envie a tag (exemplo para uma correção): `git tag v0.1.1 && git push origin v0.1.1`.
 3. O workflow *Release build* testa, gera o instalador e cria uma release **rascunho** com ele.
-4. Baixe o instalador do rascunho e assine o manifesto na sua máquina:
+4. Assine e anexe com o script (baixa o instalador do rascunho, gera `update-manifest.json` e `update-manifest.json.sig` com a sua chave e os anexa ao rascunho):
 
    ```powershell
    cd app
-   cargo run --locked --release -- --update-sign C:\downloads\Lanvox-0.1.1-windows-x64-setup.exe --update-key C:\caminho\privado\lanvox-update.key --update-version 0.1.1 --update-notes "O que mudou" --out C:\downloads\assinatura
+   $env:LANVOX_UPDATE_KEY = 'C:\caminho\privado\lanvox-update.key'   # ou passe -KeyPath
+   ./scripts/sign-release.ps1 -Version 0.1.1 -Notes "O que mudou"
    ```
 
-5. Anexe `update-manifest.json` e `update-manifest.json.sig` ao rascunho e publique a release. O app procura esses dois arquivos em `releases/latest/download/`.
+   O script recusa rodar se `Cargo.toml` não bater com a versão, se a release já estiver publicada ou se já tiver manifesto anexado.
+5. Revise o rascunho no GitHub e publique (ou rode o script com `-Publish` para publicar no mesmo passo). O app procura os dois arquivos em `releases/latest/download/`.
 6. Teste num cliente com a versão anterior: Configurações › Minha conta › Atualizações › *Procurar atualizações*.
 
 ## Notas
