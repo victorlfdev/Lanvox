@@ -99,14 +99,33 @@ mod imp {
     use std::ffi::c_void;
     use std::mem::{size_of, zeroed};
     use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::Graphics::Gdi::{
         CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetObjectW,
         SelectObject, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DrawIconEx, GetCursorInfo, GetIconInfo, GetWindowInfo, CURSORINFO, CURSOR_SHOWING,
-        DI_NORMAL, ICONINFO, WINDOWINFO,
+        DrawIconEx, GetClipCursor, GetCursorInfo, GetIconInfo, GetSystemMetrics, GetWindowInfo,
+        CURSORINFO, CURSOR_SHOWING, DI_NORMAL, ICONINFO, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WINDOWINFO,
     };
+
+    /// True while an application confines the pointer to part of the desktop. Games
+    /// do this when they take over the mouse (the pointer then is not theirs to show,
+    /// even if Windows still reports a visible arrow).
+    fn confined() -> bool {
+        unsafe {
+            let mut clip: RECT = zeroed();
+            if GetClipCursor(&mut clip) == 0 {
+                return false;
+            }
+            let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let right = left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let bottom = top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            clip.left > left || clip.top > top || clip.right < right || clip.bottom < bottom
+        }
+    }
 
     /// The visible pointer's handle and screen position.
     fn current() -> Option<(*mut c_void, i32, i32)> {
@@ -116,6 +135,7 @@ mod imp {
             if GetCursorInfo(&mut info) == 0
                 || info.flags & CURSOR_SHOWING == 0
                 || info.hCursor.is_null()
+                || confined()
             {
                 return None;
             }

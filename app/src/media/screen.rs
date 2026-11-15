@@ -414,6 +414,10 @@ fn spawn_cursor_thread(
                         shape_failed = Some(shape_id);
                     }
                 }
+                // A pointer image that cannot be drawn (a blank one, which is how many
+                // games hide the mouse) is not shown at all; without an image the
+                // viewer would draw a generic dot where the game has no pointer.
+                let visible = visible && shape_failed != Some(shape_id);
                 let viewers = keyframes.screen_viewers.load(Ordering::Relaxed);
                 let attach = visible
                     && shape.is_some()
