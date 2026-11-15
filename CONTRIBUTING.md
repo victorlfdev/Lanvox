@@ -17,7 +17,11 @@ Falhas de segurança seguem o [SECURITY.md](SECURITY.md): reporte em privado, n�
 
 ## Transparência sobre privacidade
 
-O administrador do host consegue ler os dados armazenados nele; não há criptografia de ponta a ponta. Mudanças que alterem isso, ou que contatem serviços de terceiros, precisam manter os avisos no app e no README e, para terceiros, ser opcionais e desligadas por padrão.
+O administrador do host consegue ler os dados armazenados nele; não há criptografia de ponta a ponta. Mudanças que alterem isso, ou que contatem serviços de terceiros, precisam manter os avisos no app e no README e, para terceiros, ser opcionais e desligadas por padrão. A única exceção é a verificação de atualização ao abrir (consulta o GitHub, está documentada no SECURITY.md e pode ser desligada nas configurações).
+
+## Versões e releases
+
+A política de versionamento e o passo a passo de publicação estão no [RELEASING.md](RELEASING.md).
 
 ## Antes do pull request
 
