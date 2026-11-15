@@ -1,0 +1,21 @@
+Lanvox (formerly Huddle)
+Copyright 2026 victorlfdev
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository includes third-party code:
+
+- app/vendor/nokhwa-bindings-windows: a patched copy of the
+  nokhwa-bindings-windows crate, licensed under the Apache License, Version 2.0.
+  Its original copyright and license terms apply to that directory.
+
+Lanvox is an independent project. It is not affiliated with, endorsed by or
+sponsored by Discord Inc. or any other chat or voice platform. Product names
+mentioned in this repository belong to their respective owners.
+
+H.264 video uses the OpenH264 binary built and distributed by Cisco. Lanvox does
+not include it: the app downloads it from Cisco on the user's device, verifies
+its SHA-256 and lets the user turn it off in Settings > Video.
+OpenH264 Video Codec provided by Cisco Systems, Inc.
+Cisco's license for that binary is in app/packaging/OPENH264_BINARY_LICENSE.txt
+and is also shown in the app.

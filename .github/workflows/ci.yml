@@ -1,0 +1,65 @@
+name: Rust checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Block tracked invites, backups, databases and keys
+        run: bash .github/scripts/check-secrets.sh
+
+  desktop:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust checks
+        run: rustup component add rustfmt clippy
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Lint desktop and tests
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test desktop
+        run: cargo test --locked
+      - name: Build desktop
+        run: cargo build --locked --release
+      - name: Install installer compiler
+        run: choco install innosetup --no-progress -y
+      - name: Package desktop
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -SkipBuild -RequireInstaller
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lanvox-windows-x64
+          path: app/target/distribution/*
+
+  host:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust checks
+        run: rustup component add clippy
+      - name: Lint headless host and tests
+        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+      - name: Test headless host
+        run: cargo test --locked --no-default-features
+      - name: Build container
+        run: docker build -t lanvox-host:ci .
+      - name: Build headless binary
+        run: cargo build --locked --release --no-default-features
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lanvox-host-linux-x64
+          path: app/target/release/lanvox

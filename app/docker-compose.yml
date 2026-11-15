@@ -1,0 +1,15 @@
+services:
+  lanvox-host:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${LANVOX_LISTEN_IP:-127.0.0.1}:47800:47800/tcp"
+      - "${LANVOX_LISTEN_IP:-127.0.0.1}:47800:47800/udp"
+    environment:
+      LANVOX_NAME: "Lanvox Hub"
+      LANVOX_BIND: "0.0.0.0"
+      LANVOX_OWNER_KEY: "${LANVOX_OWNER_KEY:-}"
+    volumes:
+      - lanvox-data:/data
+volumes:
+  lanvox-data:

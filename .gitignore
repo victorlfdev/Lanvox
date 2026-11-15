@@ -1,0 +1,73 @@
+# Rust build output
+**/target/
+
+# Generated screenshots
+/app/shots/
+/checks/
+
+# Local build and investigation workspace
+/capture/
+/inbox/
+/investigation.cany/
+/pinned/
+/reference/
+/agent-session.jsonl
+/build-activity.log
+/.tools/
+/craft.json
+/feed.json
+/usage.json
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Editor and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Private Lanvox runtime data
+**/identity.key
+**/identity-backup-*.key
+**/identity-import-*.tmp
+**/hosted-server.sqlite3*
+**/hosted-server.host-key
+**/hosted-server.host-token
+**/.secret-*.tmp
+**/registration-token.secret
+**/host-noise.key
+**/host.lock
+**/hosted-server.json
+/app/data/
+
+# Claude Code local state (agent worktrees)
+/.claude/
+
+# Private comparative analyses and research notes (kept locally, not published)
+/ANALISE_*.md
+/REANALISE_*.md
+/app/MECHANICS.md
+/app/mechanics.json
+/build-pkg.log
+
+# Secrets that must never be committed or released: invites carry the join token,
+# backups carry host keys and conversations, databases carry conversations.
+*.lanvox-backup
+*.lanvox-backup.*
+*.sqlite3
+*.sqlite3-*
+*.sqlite
+*.db
+host-config.json
+registration-token.secret
+*.secret
+*.key
+invite*.txt
+invite*.png
+*.invite
+*.log
