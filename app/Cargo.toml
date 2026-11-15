@@ -27,7 +27,7 @@ xcap = { version = "0.7", optional = true }
 nokhwa = { version = "0.10", features = ["input-native"], optional = true }
 dirs = "7"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-rand = "0.9"
+rand = "0.10"
 ring = "0.17.14"
 rusqlite = { version = "0.42", features = ["bundled", "backup", "blob"] }
 rfd = { version = "0.18", optional = true }
