@@ -12,7 +12,8 @@
 //! - The installer is downloaded only after that, and run only if its hash and size match
 //!   the signed manifest.
 //!
-//! The app checks at startup (on by default, can be turned off); installing needs a click.
+//! The app checks at startup and every few hours while open (on by default, can be turned
+//! off) and shows a banner plus one desktop notification; installing needs a click.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -366,6 +367,44 @@ mod client {
         text
     }
 
+    /// How often a running app looks again, when the person allowed update checks.
+    const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+    static LAST_CHECK: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    /// Version already announced with a desktop notification, so it is announced once.
+    static ANNOUNCED: Mutex<Option<String>> = Mutex::new(None);
+
+    /// Called every frame while the app runs. With `enabled` it re-checks every few hours
+    /// and raises one desktop notification when a new release shows up. It never installs.
+    pub fn poll(ctx: &egui::Context, enabled: bool) {
+        if !enabled || !configured() {
+            return;
+        }
+        if let State::Available(manifest) = state() {
+            let mut announced = ANNOUNCED.lock();
+            if announced.as_deref() != Some(manifest.version.as_str()) {
+                crate::notifications::notify(
+                    "Nova versão do Lanvox",
+                    &format!("A versão {} está disponível. Abra o app para atualizar.", manifest.version),
+                );
+                *announced = Some(manifest.version);
+            }
+            return;
+        }
+        let elapsed = LAST_CHECK.lock().map(|at| at.elapsed());
+        match elapsed {
+            Some(elapsed) if elapsed < RECHECK_EVERY => {
+                ctx.request_repaint_after(RECHECK_EVERY - elapsed);
+            }
+            _ => {
+                if matches!(state(), State::Idle | State::UpToDate | State::Failed(_)) {
+                    check();
+                    ctx.request_repaint_after(RECHECK_EVERY);
+                }
+            }
+        }
+    }
+
     /// Looks for a newer signed release in the background.
     pub fn check() {
         {
@@ -375,6 +414,7 @@ mod client {
             }
             *state = State::Checking;
         }
+        *LAST_CHECK.lock() = Some(std::time::Instant::now());
         let spawned = std::thread::Builder::new()
             .name("update-check".into())
             .spawn(|| set(check_now()));

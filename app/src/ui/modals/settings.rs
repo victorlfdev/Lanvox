@@ -435,7 +435,7 @@ fn update_section(app: &mut LanvoxApp, ui: &mut egui::Ui) {
     if ui
         .checkbox(
             &mut app.settings.check_updates_on_start,
-            "Procurar atualizações ao abrir (contata o GitHub, que vê o seu endereço IP)",
+            "Procurar atualizações ao abrir e a cada 6 horas, avisando quando houver release (contata o GitHub, que vê o seu endereço IP)",
         )
         .changed()
     {

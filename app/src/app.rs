@@ -337,6 +337,9 @@ impl LanvoxApp {
 
     pub fn tick(&mut self, ctx: &egui::Context) {
         self.notification_focused = ctx.input(|i| i.focused);
+        if self.screenshot.is_none() && !self.demo {
+            crate::updater::poll(ctx, self.settings.check_updates_on_start);
+        }
         self.auto_watch_streams();
         let actions: Vec<_> = self.desktop_events.try_iter().collect();
         for action in actions {
