@@ -37,7 +37,7 @@ jobs:
       - name: Package desktop
         shell: pwsh
         run: ./scripts/package-windows.ps1 -SkipBuild -RequireInstaller
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lanvox-windows-x64
           path: app/target/distribution/*
@@ -59,7 +59,7 @@ jobs:
         run: docker build -t lanvox-host:ci .
       - name: Build headless binary
         run: cargo build --locked --release --no-default-features
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lanvox-host-linux-x64
           path: app/target/release/lanvox
