@@ -5,6 +5,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # bincode is unmaintained (RUSTSEC-2025-0141); 2.x/3.x on crates.io are
+      # tombstones that fail to compile. Stay on 1.3.x until we migrate the
+      # wire protocol to a maintained crate (wincode/postcard/rkyv).
+      - dependency-name: bincode
+        update-types:
+          - version-update:semver-major
     groups:
       rust-minor-and-patch:
         update-types:
