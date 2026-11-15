@@ -411,6 +411,95 @@ pub(super) fn account_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             );
         }
     }
+    ui.add_space(16.0);
+    update_section(app, ui);
+}
+
+/// Signed updates from GitHub Releases. Nothing is contacted until the person asks or
+/// turns on the startup check.
+fn update_section(app: &mut LanvoxApp, ui: &mut egui::Ui) {
+    use crate::updater::{self, State};
+    let muted = |text: &str| RichText::new(text.to_string()).color(theme::color(theme::TEXT_MUTED));
+    widgets::section_label(ui, "Atualizações");
+    ui.label(muted(&format!(
+        "Versão instalada: {} (protocolo {}).",
+        env!("CARGO_PKG_VERSION"),
+        crate::auth::PROTOCOL_VERSION
+    )));
+    if !updater::configured() {
+        ui.label(muted(
+            "Esta versão não tem chave de atualização: baixe novas versões manualmente em github.com.",
+        ));
+        return;
+    }
+    if ui
+        .checkbox(
+            &mut app.settings.check_updates_on_start,
+            "Procurar atualizações ao abrir (contata o GitHub, que vê o seu endereço IP)",
+        )
+        .changed()
+    {
+        app.settings.save();
+    }
+    let state = updater::state();
+    match &state {
+        State::Idle => {}
+        State::Checking => {
+            ui.label(muted("Procurando…"));
+        }
+        State::UpToDate => {
+            ui.label(muted("Você está na versão mais recente."));
+        }
+        State::Failed(error) => {
+            ui.label(
+                RichText::new(format!("Falha: {error}")).color(theme::color(theme::TEXT_MUTED)),
+            );
+        }
+        State::Available(manifest) | State::Downloading(manifest) | State::Ready(manifest, _) => {
+            ui.label(RichText::new(format!("Versão {} disponível.", manifest.version)).strong());
+            if !manifest.notes.is_empty() {
+                ui.label(muted(&manifest.notes));
+            }
+            if manifest.protocol != crate::auth::PROTOCOL_VERSION {
+                ui.label(muted(
+                    "Esta versão muda o protocolo: atualize o host e todos os clientes juntos, ou eles não conseguirão se conectar.",
+                ));
+            }
+        }
+    }
+    ui.horizontal_wrapped(|ui| match &state {
+        State::Idle | State::UpToDate | State::Failed(_) => {
+            if ui.button("Procurar atualizações").clicked() {
+                updater::check();
+            }
+        }
+        State::Available(_) => {
+            if ui.button("Baixar e verificar").clicked() {
+                updater::download();
+            }
+        }
+        State::Ready(..) => {
+            let warning = if app.hosted.is_some() {
+                "Instalar e reiniciar (encerra o seu host)"
+            } else {
+                "Instalar e reiniciar"
+            };
+            if ui.button(warning).clicked() {
+                match updater::launch_installer() {
+                    Ok(()) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+                    Err(error) => app.notify(error),
+                }
+            }
+        }
+        State::Checking | State::Downloading(_) => {}
+    });
+    if matches!(state, State::Checking | State::Downloading(_)) {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
+    }
+    ui.label(muted(
+        "Cada atualização é assinada com a chave do projeto; arquivos sem assinatura válida, de versão antiga ou que não batem com o hash assinado são recusados.",
+    ));
 }
 
 pub(super) fn host_identity_controls(app: &mut LanvoxApp, ui: &mut egui::Ui) {

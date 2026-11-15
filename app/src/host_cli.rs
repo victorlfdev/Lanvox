@@ -324,6 +324,8 @@ pub fn requested(args: &[String]) -> bool {
                 | "--backup"
                 | "--restore"
                 | "--check"
+                | "--update-keygen"
+                | "--update-sign"
                 | "--help"
                 | "-h"
                 | "--version"
@@ -342,6 +344,9 @@ pub fn run(args: &[String]) -> io::Result<()> {
     }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!("Lanvox — host privado para LAN/VPN\n\n  --server [--data PASTA] [--bind IP] [--port PORTA]\n  --init-host --data PASTA [--owner-key CHAVE_PUBLICA_HEX]\n  --backup DESTINO --data PASTA\n  --restore ORIGEM --data PASTA\n  --check ENDERECO:PORTA\n  --print-invite --data PASTA [--address IP_OU_DNS[:PORTA]] [--copy]\n\nO host recusa novas identidades sem convite ou allowlist.\nConfiguração: host-config.json; variáveis LANVOX_BIND, LANVOX_PORT, LANVOX_DATA,\nLANVOX_NAME, LANVOX_OWNER_KEY, LANVOX_REGISTRATION_TOKEN_FILE.\nBackup usa SQLite online. Restauração exige host parado e destino novo.\n--print-invite mostra o convite lanvox:// (contém o segredo de entrada); --copy envia à área de transferência (Windows).\n--check verifica somente alcance TCP, não autenticação ou qualidade de mídia.");
+        return Ok(());
+    }
+    if crate::updater::run_cli(args)? {
         return Ok(());
     }
     if let Some(address) = value(args, "--check")? {

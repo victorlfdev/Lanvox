@@ -118,6 +118,8 @@ O instalador usa Inno Setup (`LANVOX_ISCC` pode indicar `ISCC.exe`), instala por
 
 Binários locais não recebem assinatura Authenticode automaticamente; distribuição assinada exige o certificado do responsável.
 
+O app atualiza a si mesmo a partir das Releases do GitHub, com manifesto assinado (Configurações › Minha conta › Atualizações). Como publicar versões: [RELEASING.md](RELEASING.md).
+
 ## Validação
 
 ```powershell

@@ -299,6 +299,7 @@ pub fn fill(app: &mut LanvoxApp) {
             };
         }
         "forum" => app.selected = Some(20),
+        "update" => crate::updater::show_demo(),
         "poll" => {
             if let Some(view) = &mut app.view {
                 let message = Message {

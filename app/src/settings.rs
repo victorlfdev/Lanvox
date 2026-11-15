@@ -284,6 +284,9 @@ pub struct Settings {
     /// Fetch thumbnails for video links from the linked site (YouTube or any direct URL).
     /// Off by default: the request reveals this device's IP address to that site.
     pub remote_link_previews: bool,
+    /// Look for a signed update at startup. On by default; the request reveals this
+    /// device's IP address to GitHub and can be turned off in Settings.
+    pub check_updates_on_start: bool,
     pub ui_scale: f32,
     /// 0 compact, 1 default, 2 spacious.
     pub ui_density: u8,
@@ -354,6 +357,7 @@ impl Default for Settings {
             notification_preview: false,
             h264_codec: true,
             remote_link_previews: false,
+            check_updates_on_start: true,
             ui_scale: 1.0,
             ui_density: 1,
             chat_text_size: 15.0,

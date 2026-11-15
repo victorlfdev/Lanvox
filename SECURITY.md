@@ -37,4 +37,8 @@ Só a versão mais recente recebe correções de segurança. O protocolo exige h
 
 ## Privacidade e atualizações
 
-O Lanvox não envia telemetria. Conexões a terceiros acontecem apenas quando você ativa ou pede: o codec OpenH264 baixado da Cisco (verificado por SHA-256) e, se você ativar em Configurações › Vídeo, miniaturas de links de vídeo.
+O Lanvox não envia telemetria. Ao abrir, o app consulta o GitHub por dois pequenos arquivos de uma atualização assinada (o GitHub vê o seu endereço IP); isso pode ser desligado em Configurações › Minha conta › Atualizações. Nada é baixado nem instalado sem um clique. As demais conexões a terceiros acontecem só quando você ativa ou pede: o codec OpenH264 baixado da Cisco (verificado por SHA-256) e miniaturas de links de vídeo (Configurações › Vídeo).
+
+## Atualizações assinadas
+
+O app só instala uma atualização se o manifesto da release estiver assinado com Ed25519 pela chave do projeto (a chave pública vai embutida no app), se a versão for maior que a instalada e se o instalador tiver o hash e o tamanho assinados. Endereços fora de `releases/download/` do repositório oficial são recusados. A chave privada não fica no GitHub. Veja [RELEASING.md](RELEASING.md). Uma falha que contorne essa verificação está no escopo deste documento.

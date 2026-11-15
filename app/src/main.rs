@@ -42,6 +42,7 @@ mod state;
 mod storage;
 #[cfg(feature = "gui")]
 mod ui;
+mod updater;
 
 #[cfg(feature = "gui")]
 use std::path::PathBuf;

@@ -36,7 +36,8 @@ Os testes que iniciam servidores locais agora escolhem uma porta disponível par
 - Anexos de até 100 MiB usam transferência em blocos acima de 8 MiB, com progresso, cancelamento e retomada dos blocos confirmados.
 - Os anexos preparados são guardados por identidade e host para recuperação após reiniciar. Transferências não confirmadas voltam ao preparo; mensagens confirmadas usam a fila persistente.
 - Criptografia de mídia ponta a ponta que exclua o host; permanece a proteção de transporte cliente–host.
-- Clientes web/mobile, sincronização entre dispositivos, integrações de bots/webhooks, GIFs/stickers completos e atualização automática assinada.
+- Clientes web/mobile, sincronização entre dispositivos, integrações de bots/webhooks e GIFs/stickers completos.
+- Atualização assinada implementada (`updater.rs`); falta gerar a chave do projeto, preencher `PUBLIC_KEY_HEX` e testar com uma release real (veja RELEASING.md).
 - Ensaios de dispositivos, acessibilidade com leitor de tela, instalação limpa e chamadas prolongadas em VPN real.
 
 As capturas demonstrativas servem para conferir layout; seus dados e métricas não são medições de chamadas reais.

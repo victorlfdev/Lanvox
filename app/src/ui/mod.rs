@@ -24,6 +24,76 @@ use egui::{Frame, Panel};
 use crate::app::LanvoxApp;
 use crate::model::ChannelKind;
 
+/// Version whose banner the person dismissed in this run.
+static DISMISSED_UPDATE: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
+
+/// A strip above everything when a signed update is available, downloading or ready.
+/// "Depois" hides it for this run only; nothing is installed without a click.
+fn update_banner(app: &mut LanvoxApp, ui: &mut egui::Ui) {
+    use crate::updater::{self, State};
+    let ctx = ui.ctx().clone();
+    let state = updater::state();
+    if matches!(state, State::Checking | State::Downloading(_)) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    }
+    let manifest = match &state {
+        State::Available(m) | State::Downloading(m) | State::Ready(m, _) => m.clone(),
+        _ => return,
+    };
+    let dismissed = DISMISSED_UPDATE.lock().as_deref() == Some(manifest.version.as_str());
+    if dismissed && !matches!(state, State::Downloading(_) | State::Ready(..)) {
+        return;
+    }
+    Panel::top("update-banner")
+        .frame(
+            Frame::new()
+                .fill(theme::color(theme::PANEL))
+                .inner_margin(8),
+        )
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("Nova versão {} disponível.", manifest.version))
+                        .strong(),
+                );
+                if manifest.protocol != crate::auth::PROTOCOL_VERSION {
+                    ui.label(
+                        egui::RichText::new("Muda o protocolo: atualize host e clientes juntos.")
+                            .color(theme::color(theme::YELLOW)),
+                    );
+                }
+                match &state {
+                    State::Available(_) => {
+                        if ui.button("Baixar atualização").clicked() {
+                            updater::download();
+                        }
+                        if ui.button("Depois").clicked() {
+                            *DISMISSED_UPDATE.lock() = Some(manifest.version.clone());
+                        }
+                    }
+                    State::Downloading(_) => {
+                        ui.spinner();
+                        ui.label("Baixando e verificando…");
+                    }
+                    State::Ready(..) => {
+                        let label = if app.hosted.is_some() {
+                            "Reiniciar e instalar (encerra o seu host)"
+                        } else {
+                            "Reiniciar e instalar"
+                        };
+                        if ui.button(label).clicked() {
+                            match updater::launch_installer() {
+                                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                                Err(error) => app.notify(error),
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        });
+}
+
 pub fn root(app: &mut LanvoxApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     if ctx.input(|input| input.key_pressed(egui::Key::F1)) {
@@ -63,6 +133,7 @@ pub fn root(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                 });
             });
     }
+    update_banner(app, ui);
     if app.fullscreen {
         if let Some(key) = app.focused {
             egui::CentralPanel::default()

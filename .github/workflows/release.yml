@@ -1,0 +1,44 @@
+name: Release build
+
+# Builds the installer for a version tag and attaches it to a DRAFT release.
+# The signing key is deliberately NOT here: the maintainer signs the manifest on their own
+# machine (see RELEASING.md) and publishes the draft, so a compromised GitHub account or
+# workflow can upload a file but cannot make the app accept it.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match Cargo.toml
+        shell: pwsh
+        run: |
+          $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match Cargo.toml version $version" }
+      - name: Test
+        run: cargo test --locked
+      - name: Install installer compiler
+        run: choco install innosetup --no-progress -y
+      - name: Package
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -RequireInstaller
+      - name: Draft release with the installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $installer = Get-ChildItem target/distribution -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'Installer not found.' }
+          gh release create "${{ github.ref_name }}" $installer.FullName --draft --title "Lanvox ${{ github.ref_name }}" --generate-notes --repo "${{ github.repository }}"

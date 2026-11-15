@@ -193,6 +193,9 @@ impl LanvoxApp {
         }
         // Screenshots never reach the network; otherwise verify or fetch Cisco's codec.
         crate::media::openh264_runtime::configure(screenshot.is_none() && settings.h264_codec);
+        if screenshot.is_none() && settings.check_updates_on_start && crate::updater::configured() {
+            crate::updater::check();
+        }
         let local_identity = crate::notifications::identity_fingerprint().unwrap_or_default();
         let pictures = PictureStore::default();
         let decoder = Decoder::start(pictures.clone(), cc.egui_ctx.clone());

@@ -71,3 +71,8 @@ invite*.txt
 invite*.png
 *.invite
 *.log
+
+# Update signing output (signed by the maintainer, attached to Releases, never committed)
+update-manifest.json
+update-manifest.json.sig
+lanvox-update*
