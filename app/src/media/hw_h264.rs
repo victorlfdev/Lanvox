@@ -238,15 +238,16 @@ mod imp {
                 &CODECAPI_AVEncMPVGOPSize,
                 VARIANT::from(fps.max(1) * 10),
             );
-            // Prefer quality over speed and cap the worst quantiser so scenes with
-            // sudden motion (and IDRs) do not turn into blocks. Vendors that do not
-            // support a key just ignore it.
+            // Prefer quality over speed. The quantiser cap is loose: a tight one
+            // (38) made frames too big for the bitrate, and the sender then had to
+            // drop captures to keep to the ceiling, which halved the frame rate.
+            // Vendors that do not support a key just ignore it.
             set_codec(
                 &codec,
                 &CODECAPI_AVEncCommonQualityVsSpeed,
-                VARIANT::from(75u32),
+                VARIANT::from(50u32),
             );
-            set_codec(&codec, &CODECAPI_AVEncVideoMaxQP, VARIANT::from(38u32));
+            set_codec(&codec, &CODECAPI_AVEncVideoMaxQP, VARIANT::from(46u32));
 
             let size = ((width as u64) << 32) | height as u64;
             let rate = ((fps.max(1) as u64) << 32) | 1;

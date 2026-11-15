@@ -22,6 +22,13 @@ enum HwState {
     Off,
 }
 
+/// Worker threads for the CPU encoder: half the cores (the game and the capture
+/// need the rest), at least 2 and at most 4.
+fn software_threads() -> u16 {
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    (cores / 2).clamp(2, 4) as u16
+}
+
 pub struct TemporalEncoder {
     encoder: Encoder,
     sequence: u32,
@@ -124,7 +131,7 @@ impl TemporalEncoder {
             })
             .rate_control_mode(RateControlMode::Bitrate)
             .intra_frame_period(IntraFramePeriod::from_num_frames(fps.clamp(1, 60) * 10))
-            .num_threads(2)
+            .num_threads(software_threads())
             .skip_frames(true);
         let api = super::openh264_runtime::api()
             .ok_or_else(|| "Codec H.264 da Cisco não instalado".to_string())?;

@@ -253,9 +253,12 @@ pub(super) fn share_picker(app: &mut LanvoxApp, ctx: &egui::Context) {
                     "Adaptar resolução e FPS à rede",
                 );
                 ui.add(
-                    egui::Slider::new(&mut app.settings.stream.max_bitrate_kbps, 500..=20000)
-                        .suffix(" kbit/s")
-                        .text("Banda de vídeo"),
+                    egui::Slider::new(
+                        &mut app.settings.stream.max_bitrate_kbps,
+                        500..=crate::media::screen::MAX_KBPS_LIMIT,
+                    )
+                    .suffix(" kbit/s")
+                    .text("Banda de vídeo"),
                 );
             });
             if let Some(index) = app.picker.selected {

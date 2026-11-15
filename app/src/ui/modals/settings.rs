@@ -586,9 +586,12 @@ pub(super) fn streaming_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         "Adaptar automaticamente resolução e FPS à rede",
     );
     ui.add(
-        egui::Slider::new(&mut app.settings.stream.max_bitrate_kbps, 500..=20000)
-            .suffix(" kbit/s")
-            .text("Orçamento de vídeo"),
+        egui::Slider::new(
+            &mut app.settings.stream.max_bitrate_kbps,
+            500..=crate::media::screen::MAX_KBPS_LIMIT,
+        )
+        .suffix(" kbit/s")
+        .text("Orçamento de vídeo"),
     );
     ui.label(RichText::new("Ao compartilhar uma janela, o áudio usa o processo escolhido; uma tela inteira usa a saída do sistema.").small());
     if let Some(share) = &app.share {

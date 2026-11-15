@@ -54,7 +54,14 @@ pub struct WgcCapture {
     session: GraphicsCaptureSession,
     arrived: Receiver<()>,
     size: SizeInt32,
-    staging: Option<(ID3D11Texture2D, u32, u32)>,
+    /// Two staging textures: the copy of the new frame is queued into one while the
+    /// previous frame is read from the other, so the CPU never waits for the GPU
+    /// to finish a copy queued behind a game's own rendering.
+    staging: [Option<ID3D11Texture2D>; 2],
+    staging_size: (u32, u32),
+    /// Index of the texture holding the copy of the previous frame, if any.
+    pending: Option<(usize, u32, u32)>,
+    next_staging: usize,
     window: Option<HWND>,
 }
 
@@ -148,7 +155,10 @@ impl WgcCapture {
             session,
             arrived,
             size,
-            staging: None,
+            staging: [None, None],
+            staging_size: (0, 0),
+            pending: None,
+            next_staging: 0,
             window,
         })
     }
@@ -176,13 +186,60 @@ impl WgcCapture {
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return Ok(None);
+                return self.flush_pending();
             }
             match self.arrived.recv_timeout(left) {
                 Ok(()) => {}
-                Err(RecvTimeoutError::Timeout) => return Ok(None),
+                Err(RecvTimeoutError::Timeout) => return self.flush_pending(),
                 Err(RecvTimeoutError::Disconnected) => return Err("capture stopped".into()),
             }
+        }
+    }
+
+    /// Maps one staging texture and converts it to RGBA.
+    fn read_staging(
+        &mut self,
+        index: usize,
+        pw: u32,
+        ph: u32,
+    ) -> Result<(u32, u32, Vec<u8>), String> {
+        let staging = self.staging[index].clone().ok_or("no staging texture")?;
+
+        unsafe {
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .map_err(|e| err("map frame", e))?;
+            let pitch = mapped.RowPitch as usize;
+            let src = std::slice::from_raw_parts(mapped.pData as *const u8, pitch * ph as usize);
+            let row = pw as usize * 4;
+            let mut rgba = vec![0u8; row * ph as usize];
+            // BGRA -> RGBA, rows spread over the rayon pool.
+            use rayon::prelude::*;
+            rgba.par_chunks_exact_mut(row)
+                .enumerate()
+                .for_each(|(y, out)| {
+                    let line = &src[y * pitch..y * pitch + row];
+                    for (o, i) in out
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(line.as_chunks::<4>().0)
+                    {
+                        *o = [i[2], i[1], i[0], 255];
+                    }
+                });
+            self.context.Unmap(&staging, 0);
+            Ok((pw, ph, rgba))
+        }
+    }
+
+    /// The copy queued by the last frame, when no newer frame came to push it out
+    /// (a still screen would otherwise keep showing an older picture).
+    fn flush_pending(&mut self) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
+        match self.pending.take() {
+            Some((index, w, h)) => self.read_staging(index, w, h).map(Some),
+            None => Ok(None),
         }
     }
 
@@ -213,52 +270,34 @@ impl WgcCapture {
         let w = (content.Width as u32).min(desc.Width);
         let h = (content.Height as u32).min(desc.Height);
 
-        let staging = match &self.staging {
-            Some((t, sw, sh)) if *sw == desc.Width && *sh == desc.Height => t.clone(),
-            _ => {
-                let mut sd = desc;
-                sd.Usage = D3D11_USAGE_STAGING;
-                sd.BindFlags = 0;
-                sd.MiscFlags = 0;
-                sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-                sd.MipLevels = 1;
-                sd.ArraySize = 1;
+        if self.staging_size != (desc.Width, desc.Height) || self.staging[0].is_none() {
+            let mut sd = desc;
+            sd.Usage = D3D11_USAGE_STAGING;
+            sd.BindFlags = 0;
+            sd.MiscFlags = 0;
+            sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            sd.MipLevels = 1;
+            sd.ArraySize = 1;
+            for slot in &mut self.staging {
                 let mut t = None;
                 unsafe { self.device.CreateTexture2D(&sd, None, Some(&mut t)) }
                     .map_err(|e| err("staging texture", e))?;
-                let t = t.ok_or("no staging texture")?;
-                self.staging = Some((t.clone(), desc.Width, desc.Height));
-                t
+                *slot = Some(t.ok_or("no staging texture")?);
             }
-        };
-
-        unsafe {
-            self.context.CopyResource(&staging, &texture);
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            self.context
-                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-                .map_err(|e| err("map frame", e))?;
-            let pitch = mapped.RowPitch as usize;
-            let src = std::slice::from_raw_parts(mapped.pData as *const u8, pitch * h as usize);
-            let row = w as usize * 4;
-            let mut rgba = vec![0u8; row * h as usize];
-            for (y, out) in rgba.chunks_exact_mut(row).enumerate() {
-                let line = &src[y * pitch..y * pitch + row];
-                for (o, i) in out
-                    .as_chunks_mut::<4>()
-                    .0
-                    .iter_mut()
-                    .zip(line.as_chunks::<4>().0)
-                {
-                    o[0] = i[2];
-                    o[1] = i[1];
-                    o[2] = i[0];
-                    o[3] = 255;
-                }
-            }
-            self.context.Unmap(&staging, 0);
-            Ok(Some((w, h, rgba)))
+            self.staging_size = (desc.Width, desc.Height);
+            self.pending = None;
         }
+        // Queue the copy of this frame, then read the one queued last time.
+        let write = self.next_staging;
+        self.next_staging ^= 1;
+        let target = self.staging[write].clone().ok_or("no staging texture")?;
+        unsafe { self.context.CopyResource(&target, &texture) };
+        let previous = self.pending.replace((write, w, h));
+        let Some((read, pw, ph)) = previous else {
+            // First frame: nothing to show yet; the next grab returns this one.
+            return Ok(None);
+        };
+        self.read_staging(read, pw, ph).map(Some)
     }
 }
 
