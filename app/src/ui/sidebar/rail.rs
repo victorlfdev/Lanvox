@@ -68,8 +68,11 @@ pub fn rail(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                         &format!("guild-icon-{}", g.id),
                         &bytes,
                     );
-                    let resp =
-                        rail_icon(ui, Some(theme::color(theme::ACCENT)), selected, |p, r, radius| {
+                    let resp = rail_icon(
+                        ui,
+                        Some(theme::color(theme::ACCENT)),
+                        selected,
+                        |p, r, radius| {
                             if let Some(t) = &texture {
                                 // Follow the tile's rounded corners.
                                 p.add(
@@ -88,8 +91,9 @@ pub fn rail(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                                 FontId::proportional(16.0),
                                 Color32::WHITE,
                             );
-                        })
-                        .on_hover_text(&g.name);
+                        },
+                    )
+                    .on_hover_text(&g.name);
                     resp.widget_info(|| {
                         egui::WidgetInfo::labeled(
                             egui::Role::Button,

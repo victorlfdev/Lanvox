@@ -954,7 +954,7 @@ mod tests {
         let full = target_dimensions(&settings, 1920, 1080, 0);
         let light = target_dimensions(&settings, 1920, 1080, 2);
         assert_eq!(full, (1920, 1080));
-        assert!(light.0 < full.0 && light.0 % 2 == 0 && light.1 % 2 == 0);
+        assert!(light.0 < full.0 && light.0.is_multiple_of(2) && light.1.is_multiple_of(2));
     }
 
     #[test]
