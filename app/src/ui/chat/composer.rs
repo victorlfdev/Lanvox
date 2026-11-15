@@ -207,7 +207,17 @@ pub(super) fn composer(app: &mut LanvoxApp, ui: &mut egui::Ui, ch: &Channel) {
                 let response = output.response;
                 if response.has_focus()
                     && can_attach
-                    && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::V))
+                    && ui.input(|i| {
+                        // egui-winit swallows the Ctrl+V key event and emits Paste /
+                        // PasteImage instead, so `key_pressed(V)` never fires. An image
+                        // on the clipboard (no text) arrives as PasteImage; a mixed
+                        // text+image clipboard arrives as Paste, so keep the key check
+                        // as a fallback for other backends.
+                        i.events
+                            .iter()
+                            .any(|e| matches!(e, egui::Event::PasteImage(_)))
+                            || (i.modifiers.ctrl && i.key_pressed(egui::Key::V))
+                    })
                 {
                     app.paste_image(ch.id);
                 }
