@@ -20,13 +20,8 @@ pub const KEYFRAME_INTERVAL: Duration = Duration::from_secs(8);
 /// Never answer keyframe requests faster than this; a request that crosses an
 /// IDR already in flight must not trigger another huge burst.
 const MIN_KEYFRAME_GAP: Duration = Duration::from_millis(600);
-/// Old defaults of the bandwidth slider; far too low for 1080p game content in
-/// baseline H.264 (the encoder either blocks up or the pacer drops frames).
-const LEGACY_MAX_KBPS: [u32; 2] = [6000, 12_000];
-/// Current default of the bandwidth slider.
-pub const DEFAULT_MAX_KBPS: u32 = 16_000;
-/// Highest bandwidth ceiling the slider offers.
-pub const MAX_KBPS_LIMIT: u32 = 40_000;
+/// Bitrate ceiling, whatever the resolution (kbit/s).
+const MAX_KBPS_LIMIT: u32 = 40_000;
 /// Deepest adaptation step. Steps trade fps first, then a bounded resolution cut,
 /// so quality never collapses to a blurry thumbnail.
 const MAX_LEVEL: u32 = 3;
@@ -110,7 +105,6 @@ pub struct StreamSettings {
     pub quality: u8,
     pub share_audio: bool,
     pub adaptive: bool,
-    pub max_bitrate_kbps: u32,
     pub motion_video: bool,
 }
 
@@ -122,7 +116,6 @@ impl Default for StreamSettings {
             quality: DEFAULT_QUALITY,
             share_audio: false,
             adaptive: true,
-            max_bitrate_kbps: DEFAULT_MAX_KBPS,
             motion_video: true,
         }
     }
@@ -141,24 +134,21 @@ impl StreamSettings {
             ((f64::from(h) * scale) as u32).max(2) & !1,
         )
     }
-    /// The bandwidth ceiling in kbit/s. Settings saved with the old 6 Mbit/s
-    /// default are lifted to the new default (blocky 1080p otherwise).
-    pub fn max_kbps(&self) -> u32 {
-        let kbps = if LEGACY_MAX_KBPS.contains(&self.max_bitrate_kbps) {
-            DEFAULT_MAX_KBPS
-        } else {
-            self.max_bitrate_kbps
+    /// Video bitrate for a picture size, in kbit/s: about 6 Mb/s at 720p, 12 at 1080p
+    /// and 20 at 1440p, scaled with the pixel count. Baseline H.264 needs this much
+    /// for game content; 30 fps or less needs three quarters, 15 fps about half.
+    pub fn bitrate_kbps(&self, w: u32, h: u32) -> u32 {
+        let megapixels = (w as f64 * h as f64) / 1_000_000.0;
+        let rate = match self.fps {
+            0..=15 => 0.55,
+            16..=30 => 0.75,
+            _ => 1.0,
         };
-        kbps.clamp(500, MAX_KBPS_LIMIT)
+        ((megapixels * 5.8 * 1000.0 * rate) as u32).clamp(1500, MAX_KBPS_LIMIT)
     }
     /// Target bitrate (`targetBitrate`) for this preset, in bits per second (estimated).
     pub fn target_bitrate(&self, w: u32, h: u32) -> u64 {
-        let pixels = (w as u64 * h as u64).max(1);
-        // About 0.15 bits per pixel per frame (baseline CAVLC needs it for
-        // screen content), with a floor.
-        ((pixels as f64 * self.fps as f64 * 0.15) as u64)
-            .clamp(1_500_000, 40_000_000)
-            .min(u64::from(self.max_kbps()) * 1000)
+        u64::from(self.bitrate_kbps(w, h)) * 1000
     }
 }
 
@@ -638,7 +628,7 @@ impl ScreenShare {
                     let mut encoder = TileEncoder::new();
                     let mut motion = if settings.motion_video {
                         super::temporal::TemporalEncoder::new(
-                            settings.max_kbps() * 1000,
+                            settings.bitrate_kbps(1920, 1080) * 1000,
                             settings.fps,
                             true,
                         )
@@ -677,7 +667,8 @@ impl ScreenShare {
                     // bucket may go well into debt (an IDR is large) before captures
                     // are skipped, so pacing only trims real overshoot and never
                     // turns the bitrate ceiling into a hidden frame-rate cap.
-                    let budget = f64::from(settings.max_kbps()) * 1000.0 / 8.0 * 1.5;
+                    let mut budget =
+                        f64::from(settings.bitrate_kbps(1920, 1080)) * 1000.0 / 8.0 * 1.5;
                     let mut tokens = budget * 0.5;
                     let mut token_clock = Instant::now();
                     let mut skipped_window = 0u32;
@@ -730,6 +721,7 @@ impl ScreenShare {
                                 Some(scale_rgba(&rgba, sw, sh, w, h))
                             };
                             let pic: &[u8] = scaled.as_deref().unwrap_or(&rgba);
+                            budget = settings.target_bitrate(w, h) as f64 / 8.0 * 1.5;
                             let rc = rate.get_or_insert_with(|| {
                                 RateControl::new(settings.quality, settings.target_bitrate(w, h))
                             });
@@ -748,6 +740,7 @@ impl ScreenShare {
                                     last_idr = Instant::now();
                                 }
                                 if let Some(video) = motion.as_mut() {
+                                    video.set_bitrate(settings.target_bitrate(w, h) as u32);
                                     let result = video.encode(pic, w, h, force);
                                     let backend = video.backend();
                                     if backend != shown_backend {
@@ -881,7 +874,7 @@ impl ScreenShare {
                                 || slow
                                 || overloaded
                                 || sender.media_stats().queued_bytes
-                                    > settings.max_kbps() as usize * 128;
+                                    > (budget / 1.5 / 1000.0 * 8.0) as usize * 128;
                             let previous = level;
                             if congested {
                                 level = (level + 1).min(MAX_LEVEL);
@@ -958,14 +951,22 @@ mod tests {
     }
 
     #[test]
-    fn old_default_ceilings_are_lifted() {
-        for old in LEGACY_MAX_KBPS {
-            let s = StreamSettings {
-                max_bitrate_kbps: old,
-                ..StreamSettings::default()
-            };
-            assert_eq!(s.max_kbps(), DEFAULT_MAX_KBPS);
-        }
+    fn bitrate_scales_with_resolution_and_fps() {
+        let s = StreamSettings {
+            fps: 60,
+            ..StreamSettings::default()
+        };
+        let (k720, k1080, k1440) = (
+            s.bitrate_kbps(1280, 720),
+            s.bitrate_kbps(1920, 1080),
+            s.bitrate_kbps(2560, 1440),
+        );
+        assert!((5000..=6500).contains(&k720), "{k720}");
+        assert!((11_000..=13_000).contains(&k1080), "{k1080}");
+        assert!((19_000..=22_000).contains(&k1440), "{k1440}");
+        let slow = StreamSettings { fps: 30, ..s };
+        assert!(slow.bitrate_kbps(1920, 1080) < k1080);
+        assert_eq!(s.bitrate_kbps(7680, 4320), MAX_KBPS_LIMIT);
     }
 
     #[test]

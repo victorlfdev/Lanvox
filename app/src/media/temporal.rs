@@ -138,6 +138,22 @@ impl TemporalEncoder {
         Encoder::with_api_config(api, config).map_err(|error| error.to_string())
     }
 
+    /// Bitrate for the next (re)start of the encoder. A running one keeps its
+    /// rate; a picture-size change (which restarts it) picks the new one up.
+    pub fn set_bitrate(&mut self, bitrate: u32) {
+        let bitrate = bitrate.clamp(128_000, 40_000_000);
+        if bitrate == self.bitrate {
+            return;
+        }
+        self.bitrate = bitrate;
+        // Nothing encoded yet on the CPU path: the encoder can still be rebuilt.
+        if self.cpu_size.is_none() {
+            if let Ok(encoder) = Self::build_encoder(bitrate, self.fps, self.screen) {
+                self.encoder = encoder;
+            }
+        }
+    }
+
     pub fn new(bitrate: u32, fps: u32, screen: bool) -> Result<Self, String> {
         let encoder = Self::build_encoder(bitrate, fps, screen)?;
         Ok(Self {
