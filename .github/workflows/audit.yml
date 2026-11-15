@@ -1,0 +1,33 @@
+name: Dependency audit
+
+# Checks Cargo.lock against the RustSec advisory database. Runs when the
+# lockfile changes and weekly, since new advisories appear without any commit.
+# Unmaintained crates (e.g. bincode, RUSTSEC-2025-0141) are reported as
+# warnings; known vulnerabilities fail the job.
+
+on:
+  push:
+    paths:
+      - app/Cargo.lock
+      - app/Cargo.toml
+      - .github/workflows/audit.yml
+  pull_request:
+    paths:
+      - app/Cargo.lock
+      - app/Cargo.toml
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Audit Cargo.lock
+        run: cargo audit --file app/Cargo.lock
