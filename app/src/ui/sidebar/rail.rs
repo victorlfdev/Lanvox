@@ -8,7 +8,7 @@ pub fn rail(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 let home_selected = app.home || !app.connected();
-                let home = rail_icon(ui, None, home_selected, |p, r| {
+                let home = rail_icon(ui, None, home_selected, |p, r, _| {
                     icons::paint(p, r.shrink(12.0), Icon::Home, Color32::WHITE)
                 });
                 if !app.ringing().is_empty() {
@@ -69,13 +69,15 @@ pub fn rail(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                         &bytes,
                     );
                     let resp =
-                        rail_icon(ui, Some(theme::color(theme::ACCENT)), selected, |p, r| {
+                        rail_icon(ui, Some(theme::color(theme::ACCENT)), selected, |p, r, radius| {
                             if let Some(t) = &texture {
-                                p.image(
-                                    t.id(),
-                                    r,
-                                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                                    Color32::WHITE,
+                                // Follow the tile's rounded corners.
+                                p.add(
+                                    egui::epaint::RectShape::filled(r, radius, Color32::WHITE)
+                                        .with_texture(
+                                            t.id(),
+                                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                                        ),
                                 );
                                 return;
                             }
@@ -156,7 +158,7 @@ pub fn rail(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                     }
                 }
                 if app.connected() {
-                    let add = rail_icon(ui, None, false, |p, r| {
+                    let add = rail_icon(ui, None, false, |p, r, _| {
                         icons::paint(p, r.shrink(14.0), Icon::Plus, theme::color(theme::GREEN))
                     });
                     if add.on_hover_text("Criar comunidade").clicked() {
@@ -250,12 +252,12 @@ pub(super) fn rail_icon(
     ui: &mut egui::Ui,
     fill: Option<Color32>,
     selected: bool,
-    paint: impl FnOnce(&egui::Painter, Rect),
+    paint: impl FnOnce(&egui::Painter, Rect, u8),
 ) -> egui::Response {
     let (outer, resp) = ui.allocate_exact_size(vec2(theme::RAIL_W, 56.0), Sense::click());
     let rect = Rect::from_center_size(outer.center(), vec2(48.0, 48.0));
     let hovered = resp.hovered();
-    let radius = if selected || hovered { 14.0 } else { 18.0 };
+    let radius: u8 = if selected || hovered { 14 } else { 18 };
     let bg = if selected || hovered {
         fill.unwrap_or(theme::color(theme::ACCENT))
     } else {
@@ -270,7 +272,7 @@ pub(super) fn rail_icon(
             egui::StrokeKind::Outside,
         );
     }
-    paint(ui.painter(), rect);
+    paint(ui.painter(), rect, radius);
     if selected || hovered {
         let h = if selected { 40.0 } else { 20.0 };
         let pill =

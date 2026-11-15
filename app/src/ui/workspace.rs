@@ -5,7 +5,7 @@ use egui::vec2;
 type EmojiImageTask =
     crossbeam_channel::Receiver<Result<Option<(GuildId, String, Vec<u8>)>, String>>;
 type CommunityImageTask =
-    crossbeam_channel::Receiver<Result<Option<(GuildId, bool, Vec<u8>)>, String>>;
+    crossbeam_channel::Receiver<Result<Option<(GuildId, bool, image::DynamicImage)>, String>>;
 type ConversationImageTask =
     crossbeam_channel::Receiver<Result<Option<(ChannelId, Vec<u8>)>, String>>;
 #[derive(Default)]
@@ -43,10 +43,12 @@ pub struct UiExtras {
     pub override_deny: u64,
     pub inbox_mentions: bool,
     pub visual_pending: Option<CommunityImageTask>,
+    pub visual_editor: Option<super::community_ui::VisualEditor>,
     pub conversation_image_pending: Option<ConversationImageTask>,
 }
 pub fn show(app: &mut LanvoxApp, ctx: &egui::Context) {
     super::community_ui::poll_visual(app);
+    super::community_ui::visual_editor(app, ctx);
     edit_message(app, ctx);
     host_access_confirmation(app, ctx);
     profile(app, ctx);

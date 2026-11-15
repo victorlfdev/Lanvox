@@ -37,21 +37,13 @@ pub fn visuals(app: &mut LanvoxApp, ui: &mut Ui, guild: GuildId) {
                     return Err("Escolha uma imagem de até 8 MiB.".into());
                 }
                 let image = image::open(path).map_err(|e| e.to_string())?;
-                let image = if banner {
-                    image.thumbnail(1000, 375)
+                // Keep the editor responsive on very large photos.
+                let image = if image.width().max(image.height()) > 1600 {
+                    image.thumbnail(1600, 1600)
                 } else {
-                    image.thumbnail(128, 128)
+                    image
                 };
-                let mut out = std::io::Cursor::new(Vec::new());
-                image
-                    .write_to(&mut out, image::ImageFormat::Png)
-                    .map_err(|e| e.to_string())?;
-                if out.get_ref().len() > if banner { 512 * 1024 } else { 256 * 1024 } {
-                    return Err(
-                        "A imagem convertida ainda é muito grande. Escolha outra imagem.".into(),
-                    );
-                }
-                Ok(Some((guild, banner, out.into_inner())))
+                Ok(Some((guild, banner, image)))
             })();
             let _ = tx.send(result);
         });
@@ -112,27 +104,15 @@ pub fn poll_visual(app: &mut LanvoxApp) {
     };
     app.workspace_ui.extras.visual_pending = None;
     match result {
-        Ok(Some((guild, banner, bytes))) => {
-            let visual = app
-                .view
-                .as_ref()
-                .and_then(|v| {
-                    v.workspace
-                        .community
-                        .visuals
-                        .iter()
-                        .find(|v| v.guild == guild)
-                })
-                .cloned()
-                .unwrap_or_default();
-            command(
-                app,
-                CommunityCommand::UpdateVisual {
-                    guild,
-                    icon: if banner { visual.icon } else { bytes.clone() },
-                    banner: if banner { bytes } else { visual.banner },
-                },
-            );
+        Ok(Some((guild, banner, image))) => {
+            app.workspace_ui.extras.visual_editor = Some(VisualEditor {
+                guild,
+                banner,
+                image,
+                texture: None,
+                zoom: 1.0,
+                center: (0.5, 0.5),
+            });
         }
         Ok(None) => {}
         Err(error) => app.notify(error),
@@ -215,9 +195,27 @@ pub fn banner(app: &mut LanvoxApp, ui: &mut Ui, guild: GuildId) {
         .map(|v| v.banner.clone())
         .unwrap_or_default();
     if let Some(texture) = image_texture(ui.ctx(), &format!("community-banner-{guild}"), &bytes) {
-        ui.add(
-            egui::Image::new((texture.id(), egui::vec2(ui.available_width(), 72.0)))
-                .corner_radius(6),
+        // Crop to fill the strip instead of stretching the image.
+        let size = egui::vec2(ui.available_width(), 72.0);
+        let tex = texture.size_vec2();
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let frame = size.x / size.y;
+        let uv = if tex.x / tex.y > frame {
+            let w = frame * tex.y / tex.x;
+            egui::Rect::from_min_max(
+                egui::pos2((1.0 - w) / 2.0, 0.0),
+                egui::pos2((1.0 + w) / 2.0, 1.0),
+            )
+        } else {
+            let h = tex.x / frame / tex.y;
+            egui::Rect::from_min_max(
+                egui::pos2(0.0, (1.0 - h) / 2.0),
+                egui::pos2(1.0, (1.0 + h) / 2.0),
+            )
+        };
+        ui.painter().add(
+            egui::epaint::RectShape::filled(rect, 6u8, egui::Color32::WHITE)
+                .with_texture(texture.id(), uv),
         );
         ui.add_space(10.0);
     }
@@ -345,4 +343,165 @@ pub fn image_texture(
     );
     ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
     Some(texture)
+}
+
+/// Crop/position editor shown after the person picks a community image.
+pub struct VisualEditor {
+    guild: GuildId,
+    banner: bool,
+    image: image::DynamicImage,
+    texture: Option<egui::TextureHandle>,
+    /// 1.0 shows the largest crop that fits; larger values zoom in.
+    zoom: f32,
+    /// Crop centre as a fraction of the image.
+    center: (f32, f32),
+}
+
+impl VisualEditor {
+    fn aspect(&self) -> f32 {
+        if self.banner {
+            1000.0 / 375.0
+        } else {
+            1.0
+        }
+    }
+
+    /// Crop rectangle in image pixels: (x, y, w, h), always inside the image.
+    fn crop(&self) -> (f32, f32, f32, f32) {
+        let (iw, ih) = (self.image.width() as f32, self.image.height() as f32);
+        let aspect = self.aspect();
+        let (bw, bh) = if iw / ih > aspect {
+            (ih * aspect, ih)
+        } else {
+            (iw, iw / aspect)
+        };
+        let (w, h) = (bw / self.zoom, bh / self.zoom);
+        let x = (self.center.0 * iw - w / 2.0).clamp(0.0, iw - w);
+        let y = (self.center.1 * ih - h / 2.0).clamp(0.0, ih - h);
+        (x, y, w, h)
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, String> {
+        let (x, y, w, h) = self.crop();
+        let (ow, oh) = if self.banner { (1000, 375) } else { (128, 128) };
+        let out = self
+            .image
+            .crop_imm(x as u32, y as u32, (w as u32).max(1), (h as u32).max(1))
+            .resize_exact(ow, oh, image::imageops::FilterType::Lanczos3);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        out.write_to(&mut bytes, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        let limit = if self.banner { 512 * 1024 } else { 256 * 1024 };
+        if bytes.get_ref().len() > limit {
+            return Err("A imagem convertida ainda é muito grande. Escolha outra imagem.".into());
+        }
+        Ok(bytes.into_inner())
+    }
+}
+
+pub fn visual_editor(app: &mut LanvoxApp, ctx: &egui::Context) {
+    let Some(mut editor) = app.workspace_ui.extras.visual_editor.take() else {
+        return;
+    };
+    if editor.texture.is_none() {
+        let rgba = editor.image.to_rgba8();
+        editor.texture = Some(ctx.load_texture(
+            "visual-editor",
+            egui::ColorImage::from_rgba_unmultiplied(
+                [rgba.width() as usize, rgba.height() as usize],
+                rgba.as_raw(),
+            ),
+            egui::TextureOptions::LINEAR,
+        ));
+    }
+    let title = if editor.banner {
+        "Ajustar banner"
+    } else {
+        "Ajustar ícone"
+    };
+    let width = components::modal_width(ctx, 460.0);
+    let result = components::modal(
+        ctx,
+        "visual-editor",
+        title,
+        components::ModalOptions::new(460.0)
+            .primary("Salvar")
+            .secondary("Cancelar"),
+        |ui| {
+            ui.label("Arraste a imagem para posicionar e use o zoom para ajustar o tamanho.");
+            ui.add_space(8.0);
+            let preview_w = (width - 40.0).min(400.0);
+            let size = egui::vec2(preview_w, preview_w / editor.aspect());
+            let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::drag());
+            let (iw, ih) = (editor.image.width() as f32, editor.image.height() as f32);
+            if resp.dragged() {
+                let (_, _, w, h) = editor.crop();
+                let d = resp.drag_delta();
+                editor.center.0 = (editor.center.0 - d.x * w / size.x / iw).clamp(0.0, 1.0);
+                editor.center.1 = (editor.center.1 - d.y * h / size.y / ih).clamp(0.0, 1.0);
+            }
+            if resp.hovered() {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll != 0.0 {
+                    editor.zoom = (editor.zoom * (1.0 + scroll * 0.002)).clamp(1.0, 5.0);
+                }
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+            let (x, y, w, h) = editor.crop();
+            let uv = egui::Rect::from_min_max(
+                egui::pos2(x / iw, y / ih),
+                egui::pos2((x + w) / iw, (y + h) / ih),
+            );
+            let radius: u8 = if editor.banner { 6 } else { 18 };
+            if let Some(t) = &editor.texture {
+                ui.painter().add(
+                    egui::epaint::RectShape::filled(rect, radius, egui::Color32::WHITE)
+                        .with_texture(t.id(), uv),
+                );
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Zoom");
+                ui.add(egui::Slider::new(&mut editor.zoom, 1.0..=5.0).show_value(false));
+                if ui.button("Redefinir").clicked() {
+                    editor.zoom = 1.0;
+                    editor.center = (0.5, 0.5);
+                }
+            });
+        },
+    );
+    if result.primary {
+        match editor.encode() {
+            Ok(bytes) => {
+                let guild = editor.guild;
+                let banner = editor.banner;
+                let visual = app
+                    .view
+                    .as_ref()
+                    .and_then(|v| {
+                        v.workspace
+                            .community
+                            .visuals
+                            .iter()
+                            .find(|v| v.guild == guild)
+                    })
+                    .cloned()
+                    .unwrap_or_default();
+                command(
+                    app,
+                    CommunityCommand::UpdateVisual {
+                        guild,
+                        icon: if banner { visual.icon } else { bytes.clone() },
+                        banner: if banner { bytes } else { visual.banner },
+                    },
+                );
+            }
+            Err(error) => {
+                app.notify(error);
+                app.workspace_ui.extras.visual_editor = Some(editor);
+            }
+        }
+    } else if !result.cancelled() {
+        app.workspace_ui.extras.visual_editor = Some(editor);
+    }
 }
