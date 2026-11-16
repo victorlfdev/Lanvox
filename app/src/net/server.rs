@@ -187,7 +187,9 @@ struct State {
     /// Chunked uploads still being received (written outside the state lock).
     pending_uploads: Arc<uploads::UploadRouter>,
     operations: HashMap<(UserId, String), MessageId>,
+    query: Option<(UserId, u64)>,
     rates: HashMap<UserId, (Instant, u32)>,
+    download_rates: HashMap<UserId, (Instant, u64)>,
     call_deadlines: HashMap<ChannelId, Instant>,
     media_router: Arc<media_router::MediaRouter>,
 }

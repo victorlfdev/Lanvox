@@ -17,6 +17,10 @@ mod uploads;
 
 #[derive(Default)]
 pub struct WorkspaceUi {
+    pub file_read_reserved: usize,
+    pub queries: HashMap<String, u64>,
+    pub draft_pending: Vec<PendingDraft>,
+    pub draft_restore: Option<Receiver<Vec<(ChannelId, StagedAttachment)>>>,
     pub extras: crate::ui::workspace::UiExtras,
     pub inbox_open: bool,
     pub inbox_results: Vec<Message>,
@@ -34,7 +38,6 @@ pub struct WorkspaceUi {
     pub search_error: Option<String>,
     pub first_unread: HashMap<ChannelId, MessageId>,
     pub reading_positions: HashMap<ChannelId, MessageId>,
-    pub history_has_after: HashMap<ChannelId, bool>,
     pub highlighted: Option<(MessageId, Instant)>,
     pub staged: HashMap<ChannelId, Vec<StagedAttachment>>,
     pub cancelled_uploads: HashSet<String>,
@@ -66,6 +69,7 @@ pub struct WorkspaceUi {
     /// Caret (char index) of the composer while it has focus, for `@` autocomplete.
     pub mention_cursor: Option<usize>,
     pub mention_sel: usize,
+    pub upload_receipts: HashMap<u64, String>,
     pub attachments: HashMap<ChannelId, Vec<AttachmentInfo>>,
     pub uploads: HashMap<String, ChannelId>,
     pub downloads: HashMap<u64, (AttachmentInfo, Vec<u8>)>,
@@ -109,6 +113,7 @@ pub struct WorkspaceUi {
     pub host_access_confirmation: Option<(UserId, bool)>,
     pub call_seen: HashMap<ChannelId, Instant>,
     pub sound_call: Option<ChannelId>,
+    pub message_days: HashMap<MessageId, String>,
     pub message_heights: HashMap<MessageId, f32>,
     pub message_width: f32,
     pub history_anchor: Option<MessageId>,
@@ -127,11 +132,12 @@ pub enum DownloadPurpose {
 /// A large attachment being written to disk piece by piece (never held whole in memory).
 pub struct ChunkDownload {
     pub info: AttachmentInfo,
-    pub file: std::fs::File,
+    pub file: crate::file_transfer::AtomicFile,
     pub path: std::path::PathBuf,
     pub written: u64,
     pub purpose: DownloadPurpose,
     pub last_progress: Instant,
+    pub retry_at: Option<Instant>,
 }
 
 /// Progress of one chunked upload: `sent` bytes written to the connection, `acked` bytes the
@@ -148,6 +154,13 @@ pub struct StagedAttachment {
     pub name: String,
     pub bytes: Vec<u8>,
     pub preview: Option<egui::TextureHandle>,
+    pub digest: [u8; 32],
+}
+
+pub struct PendingDraft {
+    pub channel: ChannelId,
+    pub bytes: usize,
+    pub receiver: Receiver<Result<StagedAttachment, String>>,
 }
 
 pub struct PendingBatch {
@@ -178,4 +191,74 @@ pub enum FileTask {
     Cancelled,
 }
 
-impl LanvoxApp {}
+impl WorkspaceUi {
+    pub fn attachment_bytes(&self) -> usize {
+        self.staged
+            .values()
+            .flatten()
+            .chain(self.upload_sources.values())
+            .map(|f| f.bytes.len())
+            .sum::<usize>()
+            + self.draft_pending.iter().map(|p| p.bytes).sum::<usize>()
+            + self.file_read_reserved
+    }
+    pub fn attachment_count(&self, channel: ChannelId) -> usize {
+        self.staged.get(&channel).map_or(0, Vec::len)
+            + self.attachments.get(&channel).map_or(0, Vec::len)
+            + self.uploads.values().filter(|ch| **ch == channel).count()
+            + self
+                .draft_pending
+                .iter()
+                .filter(|p| p.channel == channel)
+                .count()
+    }
+    pub fn can_stage(&self, channel: ChannelId, bytes: usize) -> bool {
+        self.draft_restore.is_none()
+            && bytes > 0
+            && bytes <= MAX_ATTACHMENT_BYTES
+            && self.attachment_count(channel) < MAX_MESSAGE_ATTACHMENTS
+            && self.attachment_bytes().saturating_add(bytes) <= 2 * MAX_ATTACHMENT_BYTES
+    }
+    pub fn accept_query(&mut self, id: u64) -> Option<String> {
+        let scope = self
+            .queries
+            .iter()
+            .find(|(_, token)| **token == id)
+            .map(|(scope, _)| scope.clone())?;
+        self.queries.remove(&scope);
+        Some(scope)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn obsolete_query_responses_do_not_consume_the_current_request() {
+        let mut workspace = WorkspaceUi::default();
+        workspace.queries.insert("search".into(), 41);
+        workspace.queries.insert("search".into(), 42);
+        assert_eq!(workspace.accept_query(41), None);
+        assert_eq!(workspace.accept_query(42), Some("search".into()));
+        assert_eq!(workspace.accept_query(42), None);
+    }
+    #[test]
+    fn reservations_and_pending_preparations_share_the_attachment_budget() {
+        let mut workspace = WorkspaceUi {
+            file_read_reserved: 2 * MAX_ATTACHMENT_BYTES,
+            ..Default::default()
+        };
+        assert!(!workspace.can_stage(1, 1));
+        workspace.file_read_reserved = 0;
+        for _ in 0..MAX_MESSAGE_ATTACHMENTS {
+            let (_tx, receiver) = bounded(1);
+            workspace.draft_pending.push(PendingDraft {
+                channel: 1,
+                bytes: 1,
+                receiver,
+            });
+        }
+        assert!(!workspace.can_stage(1, 1));
+        assert!(workspace.can_stage(2, 1));
+    }
+}

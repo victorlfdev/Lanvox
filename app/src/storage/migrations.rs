@@ -74,6 +74,67 @@ pub(super) fn migrate(connection: &mut Connection, from: u32) -> io::Result<()> 
             .execute_batch("PRAGMA user_version=4;")
             .map_err(error)?;
     }
+    if from < 5 {
+        let tx = connection.transaction().map_err(error)?;
+        tx.execute_batch("CREATE TABLE message_attachments(message INTEGER NOT NULL, attachment INTEGER NOT NULL, PRIMARY KEY(message,attachment));
+            CREATE INDEX message_attachments_attachment ON message_attachments(attachment);
+            INSERT OR IGNORE INTO message_attachments SELECT d.id, json_extract(j.value,'$.id') FROM message_details d, json_each(CAST(d.body AS TEXT),'$.attachments') j;
+            CREATE TABLE attachment_retention(id INTEGER PRIMARY KEY, created_at INTEGER NOT NULL);
+            INSERT INTO attachment_retention SELECT id,unixepoch() FROM attachments;
+            CREATE TRIGGER attachment_created AFTER INSERT ON attachments BEGIN INSERT OR REPLACE INTO attachment_retention VALUES(new.id,unixepoch()); END;
+            CREATE TRIGGER attachment_deleted AFTER DELETE ON attachments BEGIN
+                DELETE FROM attachment_chunks WHERE owner=old.id;
+                DELETE FROM upload_operations WHERE attachment=old.id;
+                DELETE FROM attachment_retention WHERE id=old.id;
+            END;
+            CREATE TRIGGER details_attachments_ai AFTER INSERT ON message_details BEGIN
+                INSERT OR IGNORE INTO message_attachments SELECT new.id,json_extract(value,'$.id') FROM json_each(CAST(new.body AS TEXT),'$.attachments');
+            END;
+            CREATE TRIGGER details_attachments_au AFTER UPDATE OF body ON message_details BEGIN
+                DELETE FROM message_attachments WHERE message=new.id;
+                INSERT OR IGNORE INTO message_attachments SELECT new.id,json_extract(value,'$.id') FROM json_each(CAST(new.body AS TEXT),'$.attachments');
+            END;
+            CREATE TRIGGER details_attachments_ad AFTER DELETE ON message_details BEGIN
+                DELETE FROM attachments WHERE id IN (SELECT attachment FROM message_attachments WHERE message=old.id)
+                    AND NOT EXISTS(SELECT 1 FROM message_attachments refs WHERE refs.attachment=attachments.id AND refs.message<>old.id);
+                DELETE FROM message_attachments WHERE message=old.id;
+            END;
+            DROP TRIGGER IF EXISTS details_meta_ai;
+            DROP TRIGGER IF EXISTS details_meta_au;
+            CREATE TRIGGER details_meta_ai AFTER INSERT ON message_details BEGIN
+                INSERT INTO message_meta(id,has_attachment) VALUES(new.id,COALESCE(json_array_length(CAST(new.body AS TEXT),'$.attachments'),0)>0) ON CONFLICT(id) DO UPDATE SET has_attachment=excluded.has_attachment;
+                DELETE FROM message_mentions WHERE message=new.id;
+                INSERT OR IGNORE INTO message_mentions SELECT new.id,value FROM json_each(CAST(new.body AS TEXT),'$.mentions');
+            END;
+            CREATE TRIGGER details_meta_au AFTER UPDATE OF body ON message_details BEGIN
+                INSERT INTO message_meta(id,has_attachment) VALUES(new.id,COALESCE(json_array_length(CAST(new.body AS TEXT),'$.attachments'),0)>0) ON CONFLICT(id) DO UPDATE SET has_attachment=excluded.has_attachment;
+                DELETE FROM message_mentions WHERE message=new.id;
+                INSERT OR IGNORE INTO message_mentions SELECT new.id,value FROM json_each(CAST(new.body AS TEXT),'$.mentions');
+            END;
+            CREATE TABLE runtime_state(id INTEGER PRIMARY KEY CHECK(id=1), next_message INTEGER NOT NULL);
+            CREATE TABLE channel_reads(user INTEGER NOT NULL, channel INTEGER NOT NULL, message INTEGER NOT NULL, PRIMARY KEY(user,channel));
+            CREATE TABLE last_sends(user INTEGER NOT NULL, channel INTEGER NOT NULL, time INTEGER NOT NULL, PRIMARY KEY(user,channel));
+            PRAGMA user_version=5;") .map_err(error)?;
+        // Older versions removed channel metadata without collecting the channel's rows.
+        // Initialized host state is authoritative; generic storage-only fixtures need not list channels.
+        let initialized: bool=tx.query_row("SELECT COALESCE(MAX(json_extract(CAST(body AS TEXT),'$.workspace.initialized')),0) FROM host_state",[],|r|r.get(0)).map_err(error)?;
+        if initialized {
+            let removed="SELECT m.id FROM messages m WHERE m.channel NOT IN (SELECT json_extract(c.value,'$.id') FROM host_state h,json_each(CAST(h.body AS TEXT),'$.channels') c)";
+            tx.execute(
+                &format!("DELETE FROM message_details WHERE id IN ({removed})"),
+                [],
+            )
+            .map_err(error)?;
+            tx.execute("DELETE FROM messages WHERE channel NOT IN (SELECT json_extract(c.value,'$.id') FROM host_state h,json_each(CAST(h.body AS TEXT),'$.channels') c)",[]).map_err(error)?;
+            tx.execute(
+                "DELETE FROM message_details WHERE id NOT IN (SELECT id FROM messages)",
+                [],
+            )
+            .map_err(error)?;
+            tx.execute("DELETE FROM attachments WHERE channel NOT IN (SELECT json_extract(c.value,'$.id') FROM host_state h,json_each(CAST(h.body AS TEXT),'$.channels') c)",[]).map_err(error)?;
+        }
+        tx.commit().map_err(error)?;
+    }
     Ok(())
 }
 

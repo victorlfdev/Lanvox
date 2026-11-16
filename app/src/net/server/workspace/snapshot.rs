@@ -77,8 +77,8 @@ impl State {
             &ServerMsg::Workspace(WorkspaceEvent::State(self.workspace_snapshot(user))),
         );
     }
-
-    pub(super) fn refresh_clients(&self) {
+    pub(super) fn refresh_clients(&mut self) {
+        self.revoke_access();
         self.refresh_media_routes();
         for user in self.clients.keys() {
             self.send_to(

@@ -167,7 +167,7 @@ impl LanvoxApp {
             if let Some(fingerprint) = link.fingerprint {
                 self.settings.expected_host = fingerprint;
             }
-            self.connect(ctx, link.address);
+            self.connect(ctx, invite);
         }
     }
 

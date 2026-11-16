@@ -56,7 +56,9 @@ pub(super) fn fixture() -> State {
         uploads: HashMap::new(),
         pending_uploads: Arc::default(),
         operations: HashMap::new(),
+        query: None,
         rates: HashMap::new(),
+        download_rates: HashMap::new(),
         call_deadlines: HashMap::new(),
         media_router: Arc::new(media_router::MediaRouter::default()),
     }

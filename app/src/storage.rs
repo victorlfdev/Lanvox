@@ -13,15 +13,17 @@ use crate::model::{
 
 mod attachments;
 mod backup;
+mod deltas;
 mod messages;
 mod migrations;
+mod retention;
 mod search;
 pub use backup::*;
 use migrations::*;
 
 /// Schema version written by this build. v2 adds the FTS5 index and search metadata; v3 turns
 /// free-text channel categories into `Category` entities.
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 /// Default and maximum page size of an advanced search.
 pub const SEARCH_DEFAULT_LIMIT: usize = 50;
@@ -129,8 +131,60 @@ impl Store {
             .query_row("SELECT body FROM host_state WHERE id=1", [], |r| r.get(0))
             .optional()
             .map_err(error)?;
-        body.map(|b| serde_json::from_slice(&b).map_err(error))
-            .transpose()
+        body.map(|b| {
+            let mut value: serde_json::Value = serde_json::from_slice(&b).map_err(error)?;
+            if value.get("next_message").is_some() {
+                let next: Option<i64> = self
+                    .connection
+                    .query_row(
+                        "SELECT next_message FROM runtime_state WHERE id=1",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(error)?;
+                if let Some(next) = next {
+                    value["next_message"] = serde_json::json!(value["next_message"]
+                        .as_u64()
+                        .unwrap_or(1)
+                        .max(next as u64));
+                }
+            }
+            if let Some(workspace) = value.get_mut("workspace").and_then(|v| v.as_object_mut()) {
+                for (table, field) in [("channel_reads", "read"), ("last_sends", "last_sends")] {
+                    let mut entries = workspace
+                        .get(field)
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let sql = if table == "channel_reads" {
+                        "SELECT user,channel,message FROM channel_reads"
+                    } else {
+                        "SELECT user,channel,time FROM last_sends"
+                    };
+                    let mut stmt = self.connection.prepare(sql).map_err(error)?;
+                    let rows = stmt
+                        .query_map([], |r| {
+                            Ok((
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, i64>(1)?,
+                                r.get::<_, i64>(2)?,
+                            ))
+                        })
+                        .map_err(error)?;
+                    for row in rows {
+                        let (user, channel, last) = row.map_err(error)?;
+                        entries.retain(|e| {
+                            !(e[0].as_i64() == Some(user) && e[1].as_i64() == Some(channel))
+                        });
+                        entries.push(serde_json::json!([user, channel, last]));
+                    }
+                    workspace.insert(field.into(), serde_json::Value::Array(entries));
+                }
+            }
+            serde_json::from_value(value).map_err(error)
+        })
+        .transpose()
     }
 
     pub fn save_state<T: Serialize>(&self, state: &T) -> io::Result<()> {

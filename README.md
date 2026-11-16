@@ -18,7 +18,7 @@ Para hospedar pelo desktop, selecione a interface que aceitará conexões e inic
 ## Recursos
 
 - DMs e grupos privados com histórico, respostas, edição, exclusão, reações, menções, mensagens fixadas e busca.
-- SQLite transacional, histórico paginado, confirmação após gravação, reenvio idempotente, rascunhos e leitura por conversa. Mensagens antigas não são apagadas ao chegar a 5.000.
+- SQLite transacional, histórico paginado, confirmação após gravação, reenvio idempotente, rascunhos e leitura por conversa. Mensagens antigas não são apagadas ao chegar a 5.000. Anexos sem referência após exclusão são removidos; uploads concluídos e não publicados expiram após 24 horas.
 - Anexos autorizados, limites, imagens e download por seletor de arquivos. Arquivos não são executados automaticamente.
 - Comunidades com proprietário, administradores, membros, convites, remoção/banimento, categorias, ordenação e restrição de canais.
 - Perfil, avatar e presença; notificações e bandeja no Windows.
@@ -90,7 +90,7 @@ A identidade do usuário usa Ed25519. Sua chave privada fica na configuração d
 
 O host mantém chave própria de transporte e token junto aos dados. Conhecer um nome ou ID não concede acesso a uma conversa. Noise protege o canal cliente–host; o administrador controla os dados armazenados. Não há criptografia das mensagens de ponta a ponta que exclua o administrador.
 
-Protocolo 5 requer atualizar host e clientes juntos. O JSON anterior é importado para SQLite e preservado como `pre-sqlite.json`. A migração local de identidades anteriores mantém a proteção contra apropriação de nome; não apague chaves para tentar recuperar uma conta.
+Protocolo 6 requer atualizar host e clientes juntos. O JSON anterior é importado para SQLite e preservado como `pre-sqlite.json`. A migração local de identidades anteriores mantém a proteção contra apropriação de nome; não apague chaves para tentar recuperar uma conta.
 
 ## Backup e restauração
 

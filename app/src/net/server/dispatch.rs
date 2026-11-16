@@ -2,6 +2,26 @@ use super::*;
 
 pub(super) fn handle_msg(state: &Arc<Mutex<State>>, me: UserId, msg: ClientMsg) {
     let mut st = state.lock();
+    if let ClientMsg::Workspace(WorkspaceCommand::DownloadChunk { attachment, offset }) = &msg {
+        let rate = st.download_rates.entry(me).or_insert((Instant::now(), 0));
+        if rate.0.elapsed() >= Duration::from_secs(1) {
+            *rate = (Instant::now(), 0);
+        }
+        if rate.1 + DOWNLOAD_PIECE_BYTES as u64 > 128 * 1024 * 1024 {
+            let retry_millis =
+                (1000u128.saturating_sub(rate.0.elapsed().as_millis())).max(1) as u16;
+            st.send_to(
+                me,
+                &ServerMsg::Workspace(WorkspaceEvent::DownloadDeferred {
+                    attachment: *attachment,
+                    offset: *offset,
+                    retry_millis,
+                }),
+            );
+            return;
+        }
+        rate.1 += DOWNLOAD_PIECE_BYTES as u64;
+    }
     if !matches!(
         &msg,
         ClientMsg::Audio { .. }
@@ -11,6 +31,7 @@ pub(super) fn handle_msg(state: &Arc<Mutex<State>>, me: UserId, msg: ClientMsg) 
             | ClientMsg::EncodedFrame { .. }
             | ClientMsg::Cursor(_)
             | ClientMsg::Ping(_)
+            | ClientMsg::Workspace(WorkspaceCommand::DownloadChunk { .. })
     ) {
         let rate = st.rates.entry(me).or_insert((Instant::now(), 0));
         if rate.0.elapsed() > Duration::from_secs(10) {
@@ -18,10 +39,22 @@ pub(super) fn handle_msg(state: &Arc<Mutex<State>>, me: UserId, msg: ClientMsg) 
         }
         rate.1 += 1;
         if rate.1 > 150 {
-            st.send_to(
-                me,
-                &ServerMsg::Error("Muitas ações. Aguarde alguns segundos.".into()),
-            );
+            let event = WorkspaceEvent::Error {
+                operation: None,
+                reason: "Muitas ações. Aguarde alguns segundos.".into(),
+            };
+            match &msg {
+                ClientMsg::Workspace(WorkspaceCommand::Query { id, .. }) => st.send_to(
+                    me,
+                    &ServerMsg::Workspace(WorkspaceEvent::QueryReply {
+                        id: *id,
+                        event: Box::new(QueryResult::Error(
+                            "Muitas ações. Aguarde alguns segundos.".into(),
+                        )),
+                    }),
+                ),
+                _ => st.send_to(me, &ServerMsg::Workspace(event)),
+            }
             return;
         }
     }

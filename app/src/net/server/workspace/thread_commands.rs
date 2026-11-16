@@ -185,14 +185,25 @@ impl State {
                         && self.find_message(message)?.channel == channel,
                     "Mensagem não autorizada",
                 )?;
-                let previous = self.workspace.clone();
+                if let Some(store) = &self.store {
+                    store
+                        .lock()
+                        .set_read(user, channel, message.saturating_sub(1))?;
+                }
+                let previous = if self.store.is_none() {
+                    Some(self.workspace.clone())
+                } else {
+                    None
+                };
                 self.workspace
                     .read
                     .retain(|(u, c, _)| *u != user || *c != channel);
                 self.workspace
                     .read
                     .push((user, channel, message.saturating_sub(1)));
-                self.persist_workspace(previous)?;
+                if let Some(previous) = previous {
+                    self.persist_workspace(previous)?;
+                }
                 self.send_to(
                     user,
                     &ServerMsg::Workspace(WorkspaceEvent::Community(

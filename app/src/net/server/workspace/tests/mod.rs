@@ -7,6 +7,7 @@ mod events;
 mod identity;
 mod messages;
 mod polls;
+mod regressions;
 mod uploads;
 
 pub(super) fn fixture() -> State {

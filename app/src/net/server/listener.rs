@@ -139,7 +139,7 @@ pub(super) fn start_listener_configured(
         }
     }
     let mut channels = saved.channels;
-    if channels.is_empty() {
+    if channels.is_empty() && !saved.workspace.initialized {
         channels = default_channels();
     }
     let next_channel = saved
@@ -203,7 +203,9 @@ pub(super) fn start_listener_configured(
         uploads: HashMap::new(),
         pending_uploads: Arc::default(),
         operations: HashMap::new(),
+        query: None,
         rates: HashMap::new(),
+        download_rates: HashMap::new(),
         call_deadlines: HashMap::new(),
         media_router: Arc::new(media_router::MediaRouter::default()),
     }));
@@ -276,7 +278,15 @@ pub(super) fn start_listener_configured(
         std::thread::Builder::new()
             .name("host-maintenance".into())
             .spawn(move || {
+                let mut maintenance_at = Instant::now();
                 while !stop.load(Ordering::SeqCst) {
+                    if maintenance_at.elapsed() >= Duration::from_secs(60) {
+                        let uploads = state.lock().pending_uploads.clone();
+                        if let Err(error) = uploads.maintain() {
+                            eprintln!("Upload maintenance: {error}");
+                        }
+                        maintenance_at = Instant::now();
+                    }
                     {
                         let mut st = state.lock();
                         let expired: Vec<_> = st

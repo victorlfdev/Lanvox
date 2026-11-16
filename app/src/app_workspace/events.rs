@@ -2,6 +2,34 @@ use super::*;
 
 impl LanvoxApp {
     pub fn on_workspace_event(&mut self, event: WorkspaceEvent) {
+        if let WorkspaceEvent::QueryReply { id, event } = event {
+            let Some(scope) = self.workspace_ui.accept_query(id) else {
+                return;
+            };
+            let event = event.into_event();
+            if let WorkspaceEvent::Error { reason, .. } = event {
+                if scope == "search" {
+                    self.workspace_ui.search_loading = false;
+                    self.workspace_ui.search_error = Some(reason.clone());
+                }
+                if scope == "inbox" {
+                    self.workspace_ui.inbox_loading = false;
+                    self.workspace_ui.inbox_error = Some(reason.clone());
+                }
+                if let Some(channel) = scope
+                    .strip_prefix("history:")
+                    .and_then(|v| v.parse::<ChannelId>().ok())
+                {
+                    if let Some(view) = &mut self.view {
+                        view.history_loading.remove(&channel);
+                    }
+                }
+                self.notify(reason);
+            } else {
+                self.on_workspace_event(event);
+            }
+            return;
+        }
         let refresh_pins = match &event {
             WorkspaceEvent::MessageChanged { message, .. } => Some(message.channel),
             WorkspaceEvent::MessageDeleted { channel, .. } => Some(*channel),
@@ -10,13 +38,14 @@ impl LanvoxApp {
         if let Some(channel) = refresh_pins
             .filter(|channel| self.workspace_ui.pinned_only && Some(*channel) == self.selected)
         {
-            self.workspace(WorkspaceCommand::Pinned { channel });
+            self.workspace_query(WorkspaceCommand::Pinned { channel });
         }
         if let WorkspaceEvent::History { channel, .. } = &event {
             if self.workspace_ui.recent_history.remove(channel) {
-                self.workspace_ui.history_has_after.insert(*channel, false);
                 if let Some(view) = &mut self.view {
+                    view.message_windows.remove(channel);
                     view.messages.remove(channel);
+                    view.history_after.remove(channel);
                 }
             }
         }
@@ -87,8 +116,29 @@ impl LanvoxApp {
                 }
             }
             WorkspaceEvent::Ack { operation, .. } => {
-                self.settings.pending.retain(|p| p.operation != operation);
-                self.settings.save();
+                let drafts = self
+                    .settings
+                    .pending
+                    .iter()
+                    .find(|pending| pending.operation == operation)
+                    .map(|p| p.attachment_drafts.clone())
+                    .unwrap_or_default();
+                let mut settings = self.settings.clone();
+                settings.pending.retain(|p| p.operation != operation);
+                match settings.try_save() {
+                    Ok(()) => {
+                        self.settings = settings;
+                        for draft in drafts {
+                            self.remove_attachment_draft(&draft);
+                            self.workspace_ui
+                                .upload_receipts
+                                .retain(|_, op| *op != draft);
+                        }
+                    }
+                    Err(error) => self.notify(format!(
+                        "Mensagem confirmada; a fila local aguarda gravação: {error}"
+                    )),
+                }
             }
             WorkspaceEvent::Pinned {
                 channel,
@@ -156,11 +206,16 @@ impl LanvoxApp {
                 has_before,
                 has_after,
             }) => {
-                self.workspace_ui
-                    .history_has_after
-                    .insert(channel, has_after);
+                if let Some(view) = &mut self.view {
+                    if has_after {
+                        view.history_after.insert(channel);
+                    } else {
+                        view.history_after.remove(&channel);
+                    }
+                }
                 self.workspace_ui.recent_history.remove(&channel);
                 if let Some(view) = &mut self.view {
+                    view.message_windows.remove(&channel);
                     view.messages.remove(&channel);
                     view.apply_workspace(&WorkspaceEvent::History {
                         channel,
@@ -178,10 +233,15 @@ impl LanvoxApp {
                 details,
                 has_after,
             }) => {
-                self.workspace_ui
-                    .history_has_after
-                    .insert(channel, has_after);
                 if let Some(view) = &mut self.view {
+                    if has_after {
+                        view.history_after.insert(channel);
+                    } else {
+                        view.history_after.remove(&channel);
+                    }
+                }
+                if let Some(view) = &mut self.view {
+                    view.message_windows.remove(&channel);
                     let list = view.messages.entry(channel).or_default();
                     for message in messages {
                         if !list.iter().any(|m| m.id == message.id) {
@@ -191,6 +251,7 @@ impl LanvoxApp {
                     list.sort_by_key(|m| m.id);
                     if list.len() > 600 {
                         list.drain(..list.len() - 600);
+                        view.history_more.insert(channel, true);
                     }
                     for detail in details {
                         view.workspace
@@ -214,6 +275,8 @@ impl LanvoxApp {
                             self.workspace_ui
                                 .first_unread
                                 .insert(summary.channel, first);
+                        } else {
+                            self.workspace_ui.first_unread.remove(&summary.channel);
                         }
                     }
                 }
@@ -306,6 +369,27 @@ impl LanvoxApp {
                     self.notify("O host informou uma posição inválida para o envio.");
                 }
             }
+            WorkspaceEvent::DownloadFailed { attachment, reason } => {
+                self.drop_download(attachment);
+                self.workspace_ui.preview_requests.remove(&attachment);
+                self.workspace_ui.download_requests.remove(&attachment);
+                self.notify(reason);
+            }
+            WorkspaceEvent::DownloadDeferred {
+                attachment,
+                offset,
+                retry_millis,
+            } => {
+                if let Some(download) = self.workspace_ui.chunk_downloads.get_mut(&attachment) {
+                    if download.written == offset {
+                        download.retry_at = Some(
+                            Instant::now()
+                                + Duration::from_millis(u64::from(retry_millis).clamp(1, 2000)),
+                        );
+                        download.last_progress = Instant::now();
+                    }
+                }
+            }
             WorkspaceEvent::AttachmentChunk { info, offset, data } => {
                 use std::io::Write;
                 let id = info.id;
@@ -329,13 +413,17 @@ impl LanvoxApp {
                         offset: next,
                     });
                 } else if let Some(done) = self.workspace_ui.chunk_downloads.remove(&id) {
-                    let _ = done.file.sync_all();
-                    match done.purpose {
-                        DownloadPurpose::Play => {
-                            self.workspace_ui.media_files.insert(id, done.path);
-                        }
-                        DownloadPurpose::Save => {
-                            self.notify(format!("Arquivo salvo em {}", done.path.display()));
+                    match done.file.commit() {
+                        Ok(path) => match done.purpose {
+                            DownloadPurpose::Play => {
+                                self.workspace_ui.media_files.insert(id, path);
+                            }
+                            DownloadPurpose::Save => {
+                                self.notify(format!("Arquivo salvo em {}", path.display()))
+                            }
+                        },
+                        Err(error) => {
+                            self.notify(format!("Não foi possível concluir o arquivo: {error}"))
                         }
                     }
                 }
@@ -349,6 +437,7 @@ impl LanvoxApp {
                     return;
                 }
                 let channel = info.channel;
+                self.workspace_ui.upload_receipts.insert(info.id, operation);
                 self.workspace_ui
                     .attachments
                     .entry(info.channel)
@@ -390,10 +479,6 @@ impl LanvoxApp {
                     self.workspace_ui.forum_failed_draft =
                         self.workspace_ui.forum_pending_draft.take();
                 }
-                if self.workspace_ui.inbox_loading {
-                    self.workspace_ui.inbox_error = Some(reason.clone());
-                }
-                self.workspace_ui.inbox_loading = false;
                 if let Some(operation) = operation {
                     for p in &mut self.settings.pending {
                         if p.operation == operation {
@@ -418,13 +503,6 @@ impl LanvoxApp {
                     }
                     self.workspace_ui.upload_names.remove(&operation);
                     self.settings.save();
-                }
-                if self.workspace_ui.search_loading {
-                    self.workspace_ui.search_loading = false;
-                    self.workspace_ui.search_error = Some(reason.clone());
-                }
-                if let Some(view) = &mut self.view {
-                    view.history_loading.clear();
                 }
                 self.notify(reason);
             }

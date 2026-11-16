@@ -517,8 +517,15 @@ impl LanvoxApp {
 impl eframe::App for LanvoxApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.voice_note = None;
+        self.videos = Default::default();
+        self.workspace_ui.chunk_downloads.clear();
+        for host in &mut self.background_hosts {
+            host.workspace.chunk_downloads.clear();
+        }
+        crate::media_cache::cleanup();
         if !self.demo {
             self.save_drafts();
+            crate::settings::flush_saves();
             crate::notifications::shutdown();
         }
     }

@@ -10,6 +10,31 @@ impl LanvoxApp {
     pub fn workspace(&self, command: WorkspaceCommand) {
         self.send(ClientMsg::Workspace(command));
     }
+    pub fn workspace_query(&mut self, command: WorkspaceCommand) {
+        let scope = match &command {
+            WorkspaceCommand::SearchAdvanced(_) => "search".to_owned(),
+            WorkspaceCommand::Inbox { .. } => "inbox".to_owned(),
+            WorkspaceCommand::Pinned { channel } => format!("pins:{channel}"),
+            WorkspaceCommand::History { channel, .. }
+            | WorkspaceCommand::Community(
+                CommunityCommand::HistoryAfter { channel, .. }
+                | CommunityCommand::MessageContext { channel, .. },
+            ) => format!("history:{channel}"),
+            _ => {
+                self.workspace(command);
+                return;
+            }
+        };
+        let Some(command) = QueryCommand::from_command(command) else {
+            return;
+        };
+        let id = rand::random::<u64>();
+        self.workspace_ui.queries.insert(scope, id);
+        self.workspace(WorkspaceCommand::Query {
+            id,
+            command: Box::new(command),
+        });
+    }
 
     pub fn select_channel(&mut self, channel: ChannelId) {
         self.selected = Some(channel);
@@ -60,7 +85,7 @@ impl LanvoxApp {
                 .and_then(|v| v.messages.get(&channel))
                 .is_some_and(|list| list.iter().any(|m| m.id == message));
             if !cached {
-                self.workspace(WorkspaceCommand::Community(
+                self.workspace_query(WorkspaceCommand::Community(
                     CommunityCommand::MessageContext {
                         channel,
                         message,
@@ -81,49 +106,46 @@ impl LanvoxApp {
         let last = self
             .view
             .as_ref()
-            .and_then(|v| {
-                v.workspace
-                    .community
-                    .unread
-                    .iter()
-                    .find(|s| s.channel == channel)
-            })
-            .and_then(|s| s.latest)
-            .or_else(|| {
-                self.view
-                    .as_ref()
-                    .and_then(|v| v.messages.get(&channel))
-                    .and_then(|messages| messages.last())
-                    .map(|m| m.id)
-            });
-        if let Some(message) = last {
-            let already = self.view.as_ref().is_some_and(|v| {
-                v.workspace
-                    .read
-                    .iter()
-                    .any(|(ch, id)| *ch == channel && *id >= message)
-            });
-            if !already {
-                self.workspace(WorkspaceCommand::Read { channel, message });
-                if let Some(view) = &mut self.view {
-                    view.workspace.read.retain(|(ch, _)| *ch != channel);
-                    view.workspace.read.push((channel, message));
-                }
-            }
+            .filter(|v| !v.history_after.contains(&channel))
+            .and_then(|v| v.messages.get(&channel))
+            .and_then(|m| m.last())
+            .map(|m| m.id);
+        if let Some(last) = last {
+            self.mark_read_until(channel, last);
         }
-        if let Some(view) = &mut self.view {
-            view.unread.remove(&channel);
-            if let Some(summary) = view
-                .workspace
+    }
+    pub fn mark_all_read(&mut self, channel: ChannelId) {
+        let last = self.view.as_ref().and_then(|v| {
+            v.workspace
                 .community
                 .unread
-                .iter_mut()
+                .iter()
                 .find(|s| s.channel == channel)
-            {
-                summary.count = 0;
-                summary.mentions = 0;
-                summary.first = None;
-            }
+                .and_then(|s| s.latest)
+                .or_else(|| {
+                    v.messages
+                        .get(&channel)
+                        .and_then(|m| m.last())
+                        .map(|m| m.id)
+                })
+        });
+        if let Some(last) = last {
+            self.mark_read_until(channel, last);
+        }
+    }
+    fn mark_read_until(&mut self, channel: ChannelId, message: MessageId) {
+        if self.view.as_ref().is_some_and(|v| {
+            v.workspace
+                .read
+                .iter()
+                .any(|(ch, id)| *ch == channel && *id >= message)
+        }) {
+            return;
+        }
+        self.workspace(WorkspaceCommand::Read { channel, message });
+        if let Some(view) = &mut self.view {
+            view.workspace.read.retain(|(ch, _)| *ch != channel);
+            view.workspace.read.push((channel, message));
         }
     }
 
@@ -155,7 +177,7 @@ impl LanvoxApp {
         } else {
             self.workspace_ui.recent_history.insert(channel);
         }
-        self.workspace(WorkspaceCommand::History {
+        self.workspace_query(WorkspaceCommand::History {
             channel,
             before,
             limit: 100,
@@ -175,7 +197,7 @@ impl LanvoxApp {
             .and_then(|list| list.last())
             .map(|m| m.id)
             .unwrap_or(0);
-        self.workspace(WorkspaceCommand::Community(
+        self.workspace_query(WorkspaceCommand::Community(
             CommunityCommand::HistoryAfter {
                 channel,
                 after,
@@ -286,6 +308,22 @@ impl LanvoxApp {
             }
         } else {
             self.pump_uploads();
+            let retries: Vec<_> = self
+                .workspace_ui
+                .chunk_downloads
+                .iter_mut()
+                .filter_map(|(id, download)| {
+                    if download.retry_at.is_some_and(|at| Instant::now() >= at) {
+                        download.retry_at = None;
+                        Some((*id, download.written))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (attachment, offset) in retries {
+                self.workspace(WorkspaceCommand::DownloadChunk { attachment, offset });
+            }
             // A download whose pieces stopped arriving (host error, lost reply) is abandoned
             // instead of leaving a spinner on screen forever.
             let stalled: Vec<u64> = self
@@ -346,7 +384,7 @@ impl LanvoxApp {
         self.workspace_ui.history_anchor = Some(message.id);
         self.workspace_ui.recent_history.insert(message.channel);
         self.workspace_ui.highlighted = Some((message.id, Instant::now()));
-        self.workspace(WorkspaceCommand::Community(
+        self.workspace_query(WorkspaceCommand::Community(
             CommunityCommand::MessageContext {
                 channel: message.channel,
                 message: message.id,

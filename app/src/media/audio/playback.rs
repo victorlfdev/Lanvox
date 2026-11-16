@@ -65,9 +65,33 @@ pub(super) fn build_output(
         last_music: [0.0; 2],
         render: Vec::with_capacity(240),
     };
+    let block = (rate as usize / 100).max(1);
+    let ring = super::output_ring::OutputRing::new(block * 4);
+    let producer = ring.clone();
+    let mut consumer = super::output_ring::OutputConsumer {
+        ring: ring.clone(),
+        mixer: mixer.clone(),
+    };
+    std::thread::Builder::new()
+        .name("audio-mix".into())
+        .spawn(move || {
+            while !producer.stop.load(Ordering::Acquire) {
+                if producer.buffered() < block * 2 {
+                    for _ in 0..block {
+                        if !producer.push(st.next_sample()) {
+                            break;
+                        }
+                    }
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
     let fault_mixer = mixer.clone();
     let err = move |e| {
         fault_mixer.device_fault.store(true, Ordering::Relaxed);
+        ring.stop.store(true, Ordering::Release);
         eprintln!("speaker error: {e}");
     };
     let cfg: cpal::StreamConfig = config.clone().into();
@@ -76,7 +100,7 @@ pub(super) fn build_output(
             &cfg,
             move |data: &mut [f32], _| {
                 for frame in data.chunks_mut(channels) {
-                    let v = st.next_sample();
+                    let v = consumer.next_sample();
                     for (channel, sample) in frame.iter_mut().enumerate() {
                         *sample = if channels == 1 {
                             (v[0] + v[1]) * 0.5
@@ -93,7 +117,7 @@ pub(super) fn build_output(
             &cfg,
             move |data: &mut [i16], _| {
                 for frame in data.chunks_mut(channels) {
-                    let v = st.next_sample();
+                    let v = consumer.next_sample();
                     for (channel, sample) in frame.iter_mut().enumerate() {
                         let value = if channels == 1 {
                             (v[0] + v[1]) * 0.5
@@ -111,7 +135,7 @@ pub(super) fn build_output(
             &cfg,
             move |data: &mut [u16], _| {
                 for frame in data.chunks_mut(channels) {
-                    let v = st.next_sample();
+                    let v = consumer.next_sample();
                     for (channel, sample) in frame.iter_mut().enumerate() {
                         let value = if channels == 1 {
                             (v[0] + v[1]) * 0.5

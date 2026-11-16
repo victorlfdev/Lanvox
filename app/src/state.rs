@@ -31,6 +31,10 @@ pub struct ServerView {
     pub workspace: WorkspaceSnapshot,
     pub history_more: HashMap<ChannelId, bool>,
     pub history_loading: HashSet<ChannelId>,
+    /// This contiguous window ends before the present. Live messages stay outside it.
+    pub message_windows: HashMap<ChannelId, std::sync::Arc<Vec<Message>>>,
+    pub avatar_revisions: HashMap<UserId, u64>,
+    pub history_after: HashSet<ChannelId>,
 }
 
 impl ServerView {
@@ -60,6 +64,9 @@ impl ServerView {
             workspace: WorkspaceSnapshot::default(),
             history_more: HashMap::new(),
             history_loading: HashSet::new(),
+            history_after: HashSet::new(),
+            message_windows: HashMap::new(),
+            avatar_revisions: HashMap::new(),
         };
         view.sync_call_channels();
         view
@@ -234,25 +241,44 @@ impl ServerView {
     pub fn details(&self, id: MessageId) -> Option<&MessageDetails> {
         self.workspace.details.iter().find(|d| d.message == id)
     }
+    pub fn message_window(&mut self, channel: ChannelId) -> std::sync::Arc<Vec<Message>> {
+        self.message_windows
+            .entry(channel)
+            .or_insert_with(|| {
+                std::sync::Arc::new(self.messages.get(&channel).cloned().unwrap_or_default())
+            })
+            .clone()
+    }
+    fn update_avatar_revision(&mut self, profile: &Profile) {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        profile.avatar.hash(&mut hash);
+        self.avatar_revisions.insert(profile.user, hash.finish());
+    }
 
     pub fn insert_message(&mut self, message: Message) {
-        let list = self.messages.entry(message.channel).or_default();
-        if let Some(existing) = list.iter_mut().find(|m| m.id == message.id) {
-            *existing = message;
-        } else {
-            list.push(message);
-            list.sort_by_key(|m| m.id);
+        let channel = message.channel;
+        self.message_windows.remove(&channel);
+        let historical = self.history_after.contains(&channel);
+        let list = self.messages.entry(channel).or_default();
+        match list.binary_search_by_key(&message.id, |m| m.id) {
+            Ok(index) => list[index] = message,
+            Err(index) if !historical || index < list.len() => {
+                list.insert(index, message);
+                if list.len() > 600 {
+                    list.remove(0);
+                    self.history_more.insert(channel, true);
+                }
+            }
+            Err(_) => {} // Fetch live messages through HistoryAfter to preserve continuity.
         }
-        // The host owns history; the desktop keeps only a bounded working set.
-        if list.len() > 600 {
-            list.drain(..list.len() - 600);
+    }
+    pub fn prune_details(&mut self) {
+        // Search/pinned metadata has its own small working allowance.
+        if self.workspace.details.len() > 5000 {
+            let ids: HashSet<_> = self.messages.values().flatten().map(|m| m.id).collect();
+            self.workspace.details.retain(|d| ids.contains(&d.message));
         }
-        let ids: HashSet<_> = self
-            .messages
-            .values()
-            .flat_map(|list| list.iter().map(|m| m.id))
-            .collect();
-        self.workspace.details.retain(|d| ids.contains(&d.message));
     }
 
     pub fn apply_workspace(&mut self, event: &WorkspaceEvent) {
@@ -270,7 +296,15 @@ impl ServerView {
                     .read
                     .push((*channel, (*message).max(previous)));
             }
+            WorkspaceEvent::ProfileUpdated(profile) => {
+                self.update_avatar_revision(profile);
+                self.workspace.profiles.retain(|p| p.user != profile.user);
+                self.workspace.profiles.push(profile.clone());
+            }
             WorkspaceEvent::State(state) => {
+                for profile in &state.profiles {
+                    self.update_avatar_revision(profile);
+                }
                 self.workspace = state.clone();
                 self.sync_call_channels();
                 for conversation in &state.conversations {
@@ -348,6 +382,7 @@ impl ServerView {
                 details,
                 has_more,
             } => {
+                self.message_windows.remove(channel);
                 let list = self.messages.entry(*channel).or_default();
                 for message in messages {
                     if !list.iter().any(|m| m.id == message.id) {
@@ -358,6 +393,7 @@ impl ServerView {
                 // Keep the loaded historical page, evict newest cached rows when browsing back.
                 if list.len() > 600 {
                     list.truncate(600);
+                    self.history_after.insert(*channel);
                 }
                 for detail in details {
                     self.workspace
@@ -371,9 +407,17 @@ impl ServerView {
             WorkspaceEvent::MessageChanged { message, details } => {
                 self.insert_message(message.clone());
                 self.workspace.details.retain(|d| d.message != message.id);
-                self.workspace.details.push(details.clone());
+                if self
+                    .messages
+                    .get(&message.channel)
+                    .is_some_and(|list| list.iter().any(|m| m.id == message.id))
+                {
+                    self.workspace.details.push(details.clone());
+                }
+                self.prune_details();
             }
             WorkspaceEvent::MessageDeleted { channel, message } => {
+                self.message_windows.remove(channel);
                 if let Some(list) = self.messages.get_mut(channel) {
                     list.retain(|m| m.id != *message);
                 }
@@ -692,3 +736,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "state_regressions.rs"]
+mod regressions;

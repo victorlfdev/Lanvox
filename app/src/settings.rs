@@ -92,6 +92,8 @@ pub struct PendingMessage {
     pub text: String,
     pub reply_to: Option<u64>,
     pub attachments: Vec<u64>,
+    #[serde(default)]
+    pub attachment_drafts: Vec<String>,
     pub error: Option<String>,
     pub attempted_at: i64,
 }
@@ -400,8 +402,65 @@ pub fn identity() -> std::io::Result<crate::auth::Identity> {
         .ok_or_else(|| std::io::Error::other("Could not open the Lanvox configuration folder"))?;
     crate::auth::Identity::load_or_create(&dir.join("identity.key"))
 }
+static SETTINGS_WRITE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+static SETTINGS_PENDING: parking_lot::Mutex<Option<(u64, Settings)>> =
+    parking_lot::Mutex::new(None);
+static SETTINGS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SETTINGS_BYTES: parking_lot::Mutex<Vec<u8>> = parking_lot::Mutex::new(Vec::new());
+pub fn flush_saves() {
+    let _guard = SETTINGS_WRITE.lock();
+    SETTINGS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let pending = SETTINGS_PENDING.lock().take();
+    if let Some((_, settings)) = pending {
+        let _ = settings.write_settings_file();
+    }
+}
+fn preference_worker() -> &'static crossbeam_channel::Sender<()> {
+    static WORKER: std::sync::OnceLock<crossbeam_channel::Sender<()>> = std::sync::OnceLock::new();
+    WORKER.get_or_init(|| {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            while rx.recv().is_ok() {
+                let snapshot = SETTINGS_PENDING.lock().clone();
+                if let Some((generation, settings)) = snapshot {
+                    let _guard = SETTINGS_WRITE.lock();
+                    if generation == SETTINGS_GENERATION.load(std::sync::atomic::Ordering::SeqCst) {
+                        let result = settings.write_settings_file();
+                        let mut pending = SETTINGS_PENDING.lock();
+                        if result.is_ok()
+                            && pending
+                                .as_ref()
+                                .is_some_and(|(token, _)| *token == generation)
+                        {
+                            *pending = None;
+                        }
+                    }
+                }
+            }
+        });
+        tx
+    })
+}
 
 impl Settings {
+    pub fn draft_is_queued(&self, identity: &str, host: &str, operation: &str) -> bool {
+        self.pending.iter().any(|pending| {
+            pending.identity == identity
+                && pending.host == host
+                && pending
+                    .attachment_drafts
+                    .iter()
+                    .any(|draft| draft == operation)
+        })
+    }
+
+    pub fn credentials_for(&self, address: &str) -> HostCredentials {
+        self.hosts
+            .get(&host_address(address))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn migrate_identity_scope(&mut self, migration: &IdentityMigration) {
         let prefix = format!("{}|{}|", migration.old_identity, migration.host);
         let replacement = format!("{}|{}|", migration.new_identity, migration.host);
@@ -457,28 +516,40 @@ impl Settings {
     }
 
     pub fn try_save(&self) -> std::io::Result<()> {
+        let _guard = SETTINGS_WRITE.lock();
+        let generation = SETTINGS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let mut pending = SETTINGS_PENDING.lock();
+        if pending
+            .as_ref()
+            .is_some_and(|(token, _)| *token < generation)
+        {
+            *pending = None;
+        }
+        drop(pending);
+        self.write_settings_file()
+    }
+    fn write_settings_file(&self) -> std::io::Result<()> {
         use std::io::Write;
         let d = base_dir()
             .ok_or_else(|| std::io::Error::other("Pasta de configuração indisponível"))?;
         let json = serde_json::to_vec_pretty(self)?;
-        let path = d.join("settings.json");
-        let temporary = path.with_extension("tmp");
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).write(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+        if *SETTINGS_BYTES.lock() == json {
+            return Ok(());
         }
-        let mut file = options.open(&temporary)?;
+        let path = d.join("settings.json");
+        let mut file = crate::file_transfer::AtomicFile::new(&path)?;
         file.write_all(&json)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(temporary, path)
+        file.commit()?;
+        *SETTINGS_BYTES.lock() = json;
+        Ok(())
     }
 
     pub fn save(&self) {
-        let _ = self.try_save();
+        let mut pending = SETTINGS_PENDING.lock();
+        let generation = SETTINGS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        *pending = Some((generation, self.clone()));
+        drop(pending);
+        let _ = preference_worker().try_send(());
     }
 }
 
@@ -569,6 +640,7 @@ mod tests {
                 text: "pending".into(),
                 reply_to: None,
                 attachments: Vec::new(),
+                attachment_drafts: Vec::new(),
                 error: None,
                 attempted_at: 0,
             });
@@ -596,5 +668,54 @@ mod tests {
         assert!(settings
             .channel_notifications
             .contains_key("old|other:47800|1"));
+    }
+    #[test]
+    fn connection_credentials_are_selected_by_host_instead_of_active_form_fields() {
+        let mut settings = Settings {
+            access_token: "residual-b".into(),
+            expected_host: "fingerprint-b".into(),
+            ..Default::default()
+        };
+        settings.hosts.insert(
+            "a:47800".into(),
+            HostCredentials {
+                access_token: "token-a".into(),
+                expected_fingerprint: "fingerprint-a".into(),
+            },
+        );
+        assert_eq!(settings.credentials_for("A").access_token, "token-a");
+        assert_eq!(
+            settings.credentials_for("a:47800").expected_fingerprint,
+            "fingerprint-a"
+        );
+        assert!(settings.credentials_for("new-host").access_token.is_empty());
+    }
+    #[test]
+    fn pending_attachment_recovery_is_scoped_and_backward_compatible() {
+        let mut settings = Settings::default();
+        let pending = PendingMessage {
+            operation: "message".into(),
+            host: "a:47800".into(),
+            identity: "alice".into(),
+            channel: 1,
+            text: "file".into(),
+            reply_to: None,
+            attachments: vec![9],
+            attachment_drafts: vec!["draft".into()],
+            error: None,
+            attempted_at: 0,
+        };
+        let mut legacy = serde_json::to_value(&pending).unwrap();
+        legacy.as_object_mut().unwrap().remove("attachment_drafts");
+        assert!(serde_json::from_value::<PendingMessage>(legacy)
+            .unwrap()
+            .attachment_drafts
+            .is_empty());
+        settings.pending.push(pending);
+        assert!(settings.draft_is_queued("alice", "a:47800", "draft"));
+        assert!(!settings.draft_is_queued("bob", "a:47800", "draft"));
+        assert!(!settings.draft_is_queued("alice", "b:47800", "draft"));
+        settings.pending.clear();
+        assert!(!settings.draft_is_queued("alice", "a:47800", "draft"));
     }
 }

@@ -118,7 +118,7 @@ impl Mixer {
         if self.deafened.load(Ordering::Relaxed) {
             return;
         }
-        let settings = self.stream_settings.lock().clone();
+        let settings = self.stream_settings.lock();
         let master = f32_load(&self.output_volume);
         let mut streams = self.streams.lock();
         for (owner, stream) in streams.iter_mut() {
@@ -146,7 +146,7 @@ impl Mixer {
     pub(super) fn pull(&self, out: &mut Vec<f32>, n: usize) {
         out.clear();
         out.resize(n, 0.0);
-        let settings = self.settings.lock().clone();
+        let settings = self.settings.lock();
         let master = f32_load(&self.output_volume);
         let mut people = self.people.lock();
         for (id, p) in people.iter_mut() {

@@ -135,6 +135,7 @@ impl LanvoxApp {
         }
         self.local_identity = target.identity;
         self.reconnect_address = Some(target.address.clone());
+        self.load_host_preferences(&target.address);
         self.settings.last_address = target.address;
         self.selected = target.selected;
         self.guild = target.guild;

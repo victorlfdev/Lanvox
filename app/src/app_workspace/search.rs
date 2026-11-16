@@ -14,7 +14,7 @@ impl LanvoxApp {
             self.workspace_ui.inbox_results.clear();
             self.workspace_ui.inbox_has_more = false;
         }
-        self.workspace(WorkspaceCommand::Inbox {
+        self.workspace_query(WorkspaceCommand::Inbox {
             mentions_only,
             before,
             limit: 50,
@@ -39,7 +39,7 @@ impl LanvoxApp {
         self.workspace_ui.search_query = request.query.clone();
         self.workspace_ui.search_offset = 0;
         self.workspace_ui.search_has_more = false;
-        self.workspace(WorkspaceCommand::SearchAdvanced(request));
+        self.workspace_query(WorkspaceCommand::SearchAdvanced(request));
     }
 
     pub fn begin_search(&mut self, request: SearchRequest) {
@@ -54,7 +54,7 @@ impl LanvoxApp {
         request.offset =
             self.workspace_ui.search_offset + self.workspace_ui.search_results.len() as u32;
         self.workspace_ui.search_loading = true;
-        self.workspace(WorkspaceCommand::SearchAdvanced(request));
+        self.workspace_query(WorkspaceCommand::SearchAdvanced(request));
     }
 
     pub(super) fn accept_search_page(

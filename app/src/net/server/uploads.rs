@@ -64,6 +64,26 @@ impl UploadRouter {
             })
             .sum()
     }
+    pub fn maintain(&self) -> io::Result<()> {
+        self.expire(Duration::from_secs(15 * 60));
+        let active: Vec<_> = self
+            .pending
+            .lock()
+            .values()
+            .filter(|p| p.digest.is_some())
+            .map(|p| p.owner)
+            .collect();
+        let store = self.store.lock().clone();
+        if let Some(store) = store {
+            let store = store.lock();
+            for owner in active {
+                store.touch_resumable(owner)?;
+            }
+            store.expire_resumable(now_secs().saturating_sub(7 * 86400))?;
+            store.collect_orphan_attachments(now_secs().saturating_sub(86400))?;
+        }
+        Ok(())
+    }
 
     pub fn count_for(&self, user: UserId) -> usize {
         self.pending
@@ -92,8 +112,11 @@ impl UploadRouter {
         let sink = self.sink.lock().clone();
         if let Some(sink) = sink {
             sink.lock().delete_chunks(owner);
-        } else if let Some(store) = self.store.lock().clone() {
-            store.lock().delete_chunks(owner);
+        } else {
+            let store = self.store.lock().clone();
+            if let Some(store) = store {
+                store.lock().delete_chunks(owner);
+            }
         }
     }
 
@@ -204,6 +227,7 @@ impl UploadRouter {
         match pending.get_mut(&key) {
             Some(p) if p.owner == owner && p.size == size => {
                 p.received += data.len() as u64;
+                p.started = Instant::now();
                 Ok(p.received)
             }
             _ => {
@@ -221,7 +245,8 @@ impl UploadRouter {
     /// Drops what an upload stored.
     pub fn discard(&self, upload: &PendingUpload) {
         if upload.digest.is_some() {
-            if let Some(store) = self.store.lock().clone() {
+            let store = self.store.lock().clone();
+            if let Some(store) = store {
                 let _ = store.lock().remove_resumable(upload.owner);
                 return;
             }

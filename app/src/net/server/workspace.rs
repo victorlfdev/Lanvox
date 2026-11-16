@@ -55,7 +55,7 @@ pub(super) struct WorkspaceData {
     #[serde(default)]
     upload_operations: Vec<(UserId, String, u64)>,
     #[serde(default)]
-    initialized: bool,
+    pub(super) initialized: bool,
     #[serde(default)]
     revoked_keys: Vec<[u8; 32]>,
     #[serde(default)]
@@ -102,14 +102,24 @@ impl State {
             ) => Some(operation.clone()),
             _ => None,
         };
+        let download = match &command {
+            WorkspaceCommand::Download { attachment }
+            | WorkspaceCommand::DownloadChunk { attachment, .. } => Some(*attachment),
+            _ => None,
+        };
         if let Err(e) = self.workspace_command(user, command) {
-            self.send_to(
-                user,
-                &ServerMsg::Workspace(WorkspaceEvent::Error {
+            let event = if let Some(attachment) = download {
+                WorkspaceEvent::DownloadFailed {
+                    attachment,
+                    reason: e.to_string(),
+                }
+            } else {
+                WorkspaceEvent::Error {
                     operation,
                     reason: e.to_string(),
-                }),
-            );
+                }
+            };
+            self.send_to(user, &ServerMsg::Workspace(event));
         }
     }
     fn workspace_command(
@@ -119,6 +129,13 @@ impl State {
     ) -> std::io::Result<()> {
         use WorkspaceCommand as C;
         match command {
+            C::Query { id, command } => {
+                require(self.query.is_none(), "Consulta inválida")?;
+                self.query = Some((user, id));
+                self.handle_workspace(user, command.into_command());
+                self.query = None;
+                Ok(())
+            }
             C::Community(command) => self.community_command(user, command),
             command @ (C::RotateIdentity { .. }
             | C::SetHostAccess { .. }

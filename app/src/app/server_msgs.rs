@@ -123,6 +123,16 @@ impl LanvoxApp {
     // ----- text -----
 
     pub fn send_message(&mut self, channel: ChannelId) {
+        if self.workspace_ui.draft_restore.is_some()
+            || self
+                .workspace_ui
+                .draft_pending
+                .iter()
+                .any(|p| p.channel == channel)
+        {
+            self.notify("Aguarde a preparação dos anexos antes de enviar.");
+            return;
+        }
         let text = self
             .compose
             .get(&channel)
@@ -168,6 +178,10 @@ impl LanvoxApp {
                 channel,
                 text,
                 reply_to: self.workspace_ui.reply_to.take(),
+                attachment_drafts: attachments
+                    .iter()
+                    .filter_map(|id| self.workspace_ui.upload_receipts.get(id).cloned())
+                    .collect(),
                 attachments,
                 error: None,
                 attempted_at: now_secs(),

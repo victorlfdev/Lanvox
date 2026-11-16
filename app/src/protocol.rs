@@ -12,7 +12,7 @@ use crate::model::*;
 pub const DEFAULT_PORT: u16 = 47800;
 pub const DISCOVERY_PORT: u16 = 47801;
 // Kept from the previous name on purpose; see branding.rs.
-pub const DISCOVERY_MAGIC: &str = "HUDDLE5";
+pub const DISCOVERY_MAGIC: &str = "HUDDLE6";
 /// Largest packet accepted, to guard against garbage on the socket.
 pub const MAX_PACKET: usize = 32 * 1024 * 1024;
 pub const MAX_VIDEO_SIDE: u32 = 8192;

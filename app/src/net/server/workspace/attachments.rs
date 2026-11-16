@@ -37,7 +37,8 @@ impl State {
 
     pub(super) fn stored_attachment_bytes(&self) -> std::io::Result<u64> {
         if let Some(store) = &self.store {
-            return Ok(store.lock().attachment_bytes()? + self.pending_uploads.unwritten_bytes());
+            let stored = store.lock().attachment_bytes()?;
+            return Ok(stored + self.pending_uploads.unwritten_bytes());
         }
         let done: u64 = self.uploads.values().map(|(_, b)| b.len() as u64).sum();
         Ok(done + self.pending_uploads.unwritten_bytes())

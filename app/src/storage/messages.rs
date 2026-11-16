@@ -2,6 +2,7 @@ use super::*;
 
 impl Store {
     /// Message, metadata and idempotency key commit in one transaction.
+    #[cfg(test)]
     pub fn insert<T: Serialize>(
         &mut self,
         message: &Message,
@@ -135,6 +136,7 @@ impl Store {
             .transpose()
     }
 
+    #[cfg(test)]
     pub fn update<T: Serialize>(&mut self, message: &Message, state: &T) -> io::Result<()> {
         let tx = self.connection.transaction().map_err(error)?;
         tx.execute(

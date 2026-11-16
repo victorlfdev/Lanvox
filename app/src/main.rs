@@ -20,6 +20,8 @@ mod branding;
 mod categories;
 #[cfg(feature = "gui")]
 mod demo;
+#[cfg(feature = "gui")]
+mod file_transfer;
 mod host_backup;
 mod host_cli;
 mod invites;

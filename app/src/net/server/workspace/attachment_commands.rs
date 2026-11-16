@@ -145,7 +145,7 @@ impl State {
                     );
                     return Ok(());
                 }
-                self.pending_uploads.expire(Duration::from_secs(15 * 60));
+                self.pending_uploads.maintain()?;
                 let key = (user, operation.clone());
                 require(
                     self.pending_uploads.count_for(user) < 3,
@@ -191,7 +191,7 @@ impl State {
                 size,
                 digest,
             } => {
-                self.pending_uploads.expire(Duration::from_secs(15 * 60));
+                self.pending_uploads.maintain()?;
                 self.require_write(user, channel)?;
                 require(
                     self.has_permission(user, channel, permission::ATTACH),

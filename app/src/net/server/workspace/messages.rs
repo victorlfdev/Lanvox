@@ -219,7 +219,10 @@ impl State {
                 "Resposta pertence a outra conversa",
             )?;
         }
-        require(attachments.len() <= 8, "Limite de oito anexos por mensagem")?;
+        require(
+            attachments.len() <= MAX_MESSAGE_ATTACHMENTS,
+            "Limite de oito anexos por mensagem",
+        )?;
         let mut infos = Vec::new();
         for id in attachments {
             let info = self.find_attachment_info(id)?;
@@ -246,11 +249,6 @@ impl State {
             time: now_secs(),
             text,
         };
-        let previous = self.workspace.clone();
-        self.workspace
-            .last_sends
-            .retain(|(u, c, t)| (*u != user || *c != channel) && now_secs() - *t <= 86400);
-        self.workspace.last_sends.push((user, channel, now_secs()));
         let mentions = crate::mentions::mentioned(&message.text, &self.mention_candidates(channel));
         let details = MessageDetails {
             message: message.id,
@@ -259,33 +257,44 @@ impl State {
             mentions,
             ..Default::default()
         };
-        self.workspace.details.push(details.clone());
-        let details = self.with_reply_preview(details);
-        self.next_message = self
-            .next_message
-            .checked_add(1)
-            .ok_or_else(|| std::io::Error::other("Limite de mensagens atingido"))?;
-        let result = if let Some(store) = &self.store {
-            store
-                .lock()
-                .insert(&message, operation.as_deref(), &self.saved(false))
-        } else {
-            self.messages.push(message.clone());
-            let result = self.save_to_disk();
-            if result.is_err() {
-                self.messages.pop();
-            }
-            result
-        };
-        if let Err(e) = result {
-            self.next_message = message.id;
-            self.workspace = previous;
-            return Err(e);
-        }
-        if self.store.is_some() {
+        if let Some(store) = &self.store {
+            // Poll creation also changes community metadata; keep it in the same transaction.
+            let metadata = self
+                .workspace
+                .community
+                .polls
+                .iter()
+                .any(|p| p.message == message.id)
+                .then(|| self.saved(false));
+            store.lock().append_message(
+                &message,
+                operation.as_deref(),
+                &details,
+                metadata.as_ref(),
+            )?;
+            self.next_message = message.id + 1;
+            self.workspace.details.push(details.clone());
             self.messages.push(message.clone());
             self.trim_cache(channel);
+        } else {
+            let previous = self.workspace.clone();
+            self.next_message = message.id + 1;
+            self.workspace.details.push(details.clone());
+            self.messages.push(message.clone());
+            if let Err(error) = self.save_to_disk() {
+                self.messages.pop();
+                self.workspace = previous;
+                self.next_message = message.id;
+                return Err(error);
+            }
         }
+        self.workspace
+            .last_sends
+            .retain(|(u, c, t)| (*u != user || *c != channel) && now_secs() - *t <= 86400);
+        self.workspace
+            .last_sends
+            .push((user, channel, message.time));
+        let details = self.with_reply_preview(details);
         if let Some(operation) = operation {
             if self.store.is_none() {
                 self.operations

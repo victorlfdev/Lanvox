@@ -82,7 +82,22 @@ pub(super) fn composer(app: &mut LanvoxApp, ui: &mut egui::Ui, ch: &Channel) {
                 if let Some(files) = app.workspace_ui.attachments.get_mut(&ch.id) {
                     files.retain(|f| f.id != attachment.id);
                 }
+                if let Some(operation) = app.workspace_ui.upload_receipts.remove(&attachment.id) {
+                    app.remove_attachment_draft(&operation);
+                }
             }
+        });
+    }
+    let preparing = app.workspace_ui.draft_restore.is_some()
+        || app
+            .workspace_ui
+            .draft_pending
+            .iter()
+            .any(|p| p.channel == ch.id);
+    if preparing {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("Preparando anexos…");
         });
     }
     let online = app.demo || app.client.as_ref().is_some_and(|c| c.is_alive());
@@ -280,6 +295,7 @@ pub(super) fn composer(app: &mut LanvoxApp, ui: &mut egui::Ui, ch: &Channel) {
                 send |= ui
                     .add_enabled_ui(
                         online
+                            && !preparing
                             && app.voice_note.is_none()
                             && !app
                                 .workspace_ui
@@ -347,7 +363,7 @@ pub(super) fn composer(app: &mut LanvoxApp, ui: &mut egui::Ui, ch: &Channel) {
             Err(error) => app.notify(error),
         }
     }
-    if send && online && app.voice_note.is_none() {
+    if send && online && !preparing && app.voice_note.is_none() {
         let count = app.workspace_ui.staged.get(&ch.id).map_or(0, Vec::len);
         if count > 0 {
             app.begin_attachment_batch(ch.id);
@@ -499,26 +515,7 @@ fn voice_note_controls(
     }
     if attach {
         if let Some(bytes) = &note.bytes {
-            let staged_bytes: usize = app
-                .workspace_ui
-                .staged
-                .values()
-                .flatten()
-                .map(|file| file.bytes.len())
-                .sum();
-            let count = app.workspace_ui.staged.get(&channel).map_or(0, Vec::len)
-                + app
-                    .workspace_ui
-                    .attachments
-                    .get(&channel)
-                    .map_or(0, Vec::len)
-                + app
-                    .workspace_ui
-                    .uploads
-                    .values()
-                    .filter(|ch| **ch == channel)
-                    .count();
-            if count >= 10 || staged_bytes.saturating_add(bytes.len()) > 2 * MAX_ATTACHMENT_BYTES {
+            if !app.workspace_ui.can_stage(channel, bytes.len()) {
                 app.notify("Não há espaço para anexar a gravação. Envie ou remova outros arquivos primeiro.");
                 app.voice_note = Some(note);
                 return;
@@ -693,7 +690,9 @@ pub(super) fn pending_rows(app: &mut LanvoxApp, ui: &mut egui::Ui, channel: Chan
                             app.settings
                                 .pending
                                 .retain(|p| p.operation != message.operation);
+                            app.workspace_ui.reply_to = message.reply_to;
                             app.save_drafts();
+                            app.restore_attachment_drafts();
                         }
                     });
                 } else {

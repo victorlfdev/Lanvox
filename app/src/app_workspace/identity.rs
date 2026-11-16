@@ -45,12 +45,19 @@ impl LanvoxApp {
         }
         let mut settings = self.settings.clone();
         for receipt in &receipts {
+            if let Err(error) = super::uploads::migrate_attachment_drafts(receipt) {
+                self.notify(format!("Os anexos aguardam recuperação: {error}"));
+                return;
+            }
             settings.migrate_identity_scope(receipt);
         }
         match settings.try_save() {
             Ok(()) => {
                 self.settings = settings;
                 self.local_identity = fingerprint;
+                for receipt in &receipts {
+                    super::uploads::prune_migrated_drafts(receipt);
+                }
             }
             Err(error) => self.notify(format!(
                 "Identidade recuperada; os rascunhos anteriores aguardam gravação local: {error}"
@@ -59,6 +66,11 @@ impl LanvoxApp {
     }
 
     pub fn begin_identity_rotation(&mut self) {
+        if !self.workspace_ui.draft_pending.is_empty() || self.workspace_ui.draft_restore.is_some()
+        {
+            self.notify("Aguarde a preparação dos anexos antes de rotacionar sua identidade.");
+            return;
+        }
         let Some(client) = &self.client else { return };
         let address = client.address.clone();
         let user = self.me();
@@ -131,6 +143,7 @@ impl LanvoxApp {
                 .collect();
             let mut settings = self.settings.clone();
             for receipt in &receipts {
+                super::uploads::migrate_attachment_drafts(receipt)?;
                 settings.migrate_identity_scope(receipt);
             }
             settings.try_save()?;
@@ -140,6 +153,9 @@ impl LanvoxApp {
                 client.public_key = public_key;
             }
             self.local_identity = fingerprint;
+            for receipt in &receipts {
+                super::uploads::prune_migrated_drafts(receipt);
+            }
             Ok(())
         })();
         match result {

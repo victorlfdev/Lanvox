@@ -82,7 +82,6 @@ impl LanvoxApp {
         ctx: &egui::Context,
         user: UserId,
     ) -> Option<egui::TextureHandle> {
-        use std::hash::{Hash, Hasher};
         let bytes = &self
             .view
             .as_ref()?
@@ -94,9 +93,13 @@ impl LanvoxApp {
         if bytes.is_empty() {
             return None;
         }
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        bytes.hash(&mut hash);
-        let hash = hash.finish();
+        let hash = self
+            .view
+            .as_ref()?
+            .avatar_revisions
+            .get(&user)
+            .copied()
+            .unwrap_or(0);
         if let Some((existing, texture)) = self.avatar_textures.get(&user) {
             if *existing == hash {
                 return Some(texture.clone());

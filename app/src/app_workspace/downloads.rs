@@ -40,7 +40,7 @@ impl LanvoxApp {
     }
 
     pub(super) fn begin_streamed_save(&mut self, info: AttachmentInfo, path: std::path::PathBuf) {
-        match std::fs::File::create(&path) {
+        match crate::file_transfer::AtomicFile::new(&path) {
             Ok(file) => {
                 let id = info.id;
                 self.drop_download(id);
@@ -53,6 +53,7 @@ impl LanvoxApp {
                         written: 0,
                         purpose: DownloadPurpose::Save,
                         last_progress: Instant::now(),
+                        retry_at: None,
                     },
                 );
                 self.notify("Baixando o arquivo…");
@@ -77,7 +78,12 @@ impl LanvoxApp {
         {
             return;
         }
-        let path = crate::media_cache::path_for(id, &info.name);
+        let path = crate::media_cache::path_for(
+            &self.local_identity,
+            &self.current_host(),
+            id,
+            &info.name,
+        );
         let mut keep: HashSet<std::path::PathBuf> = self
             .workspace_ui
             .media_files
@@ -94,9 +100,18 @@ impl LanvoxApp {
                 .values()
                 .map(|d| d.path.clone()),
         );
+        for host in &self.background_hosts {
+            keep.extend(host.workspace.media_files.values().cloned());
+            keep.extend(
+                host.workspace
+                    .chunk_downloads
+                    .values()
+                    .map(|d| d.file.temporary_path().to_owned()),
+            );
+        }
         crate::media_cache::trim(&keep);
         self.workspace_ui.media_files.retain(|_, p| p.exists());
-        match std::fs::File::create(&path) {
+        match crate::file_transfer::AtomicFile::new(&path) {
             Ok(file) => {
                 self.workspace_ui.chunk_downloads.insert(
                     id,
@@ -107,6 +122,7 @@ impl LanvoxApp {
                         written: 0,
                         purpose: DownloadPurpose::Play,
                         last_progress: Instant::now(),
+                        retry_at: None,
                     },
                 );
                 self.workspace(WorkspaceCommand::DownloadChunk {
@@ -133,9 +149,7 @@ impl LanvoxApp {
     pub(super) fn drop_download(&mut self, id: u64) {
         self.videos.wanted.remove(&id);
         if let Some(download) = self.workspace_ui.chunk_downloads.remove(&id) {
-            let path = download.path.clone();
             drop(download);
-            let _ = std::fs::remove_file(path);
         }
     }
 
@@ -149,7 +163,13 @@ impl LanvoxApp {
         self.file_pending = Some(rx);
         std::thread::spawn(move || {
             let task = if let Some(path) = rfd::FileDialog::new().set_file_name(name).save_file() {
-                match std::fs::write(&path, bytes) {
+                match (|| -> std::io::Result<()> {
+                    use std::io::Write;
+                    let mut file = crate::file_transfer::AtomicFile::new(&path)?;
+                    file.write_all(&bytes)?;
+                    file.commit()?;
+                    Ok(())
+                })() {
                     Ok(()) => FileTask::Saved(format!("Arquivo salvo em {}", path.display())),
                     Err(e) => FileTask::Error(format!("Não foi possível salvar: {e}")),
                 }
@@ -161,9 +181,20 @@ impl LanvoxApp {
     }
 
     pub fn poll_file_task(&mut self, ctx: &egui::Context) {
-        let task = self.file_pending.as_ref().and_then(|rx| rx.try_recv().ok());
+        self.poll_draft_tasks();
+        let task = self
+            .file_pending
+            .as_ref()
+            .and_then(|rx| match rx.try_recv() {
+                Ok(task) => Some(task),
+                Err(crossbeam_channel::TryRecvError::Disconnected) => Some(FileTask::Error(
+                    "A tarefa de arquivo foi interrompida.".into(),
+                )),
+                Err(crossbeam_channel::TryRecvError::Empty) => None,
+            });
         if let Some(task) = task {
             self.file_pending = None;
+            self.workspace_ui.file_read_reserved = 0;
             match task {
                 FileTask::Uploads { channel, files } => {
                     for (name, bytes) in files {
@@ -190,7 +221,11 @@ impl LanvoxApp {
                 FileTask::Cancelled => {}
             }
         }
-        if self.file_pending.is_some() {
+        if self.file_pending.is_some()
+            || !self.workspace_ui.chunk_downloads.is_empty()
+            || !self.workspace_ui.draft_pending.is_empty()
+            || self.workspace_ui.draft_restore.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }

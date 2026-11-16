@@ -186,7 +186,14 @@ impl State {
                     avatar,
                 });
                 self.persist_workspace(previous)?;
-                self.refresh_clients();
+                if let Some(profile) = self.workspace.profiles.iter().find(|p| p.user == user) {
+                    self.broadcast(&ServerMsg::Workspace(WorkspaceEvent::ProfileUpdated(
+                        profile.clone(),
+                    )));
+                }
+                if let Some(user) = self.users.get(&user) {
+                    self.broadcast(&ServerMsg::UserUpdated(user.clone()));
+                }
             }
             _ => unreachable!("routed by workspacecommand"),
         }

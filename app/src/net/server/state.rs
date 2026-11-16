@@ -47,11 +47,17 @@ impl State {
         let channel = self.voice.get(&a).and_then(|v| v.channel);
         channel.is_some_and(|ch| {
             self.voice.get(&b).and_then(|v| v.channel) == Some(ch)
-                && (ch < CALL_ID_BASE
-                    || self
-                        .calls
+                && (if ch < CALL_ID_BASE {
+                    [a, b].into_iter().all(|user| {
+                        self.can_access(user, ch)
+                            && self.has_permission(user, ch, permission::CONNECT)
+                            && !self.is_timed_out(user, ch)
+                    })
+                } else {
+                    self.calls
                         .get(&ch)
-                        .is_some_and(|c| c.members.contains(&a) && c.members.contains(&b)))
+                        .is_some_and(|c| c.members.contains(&a) && c.members.contains(&b))
+                })
         })
     }
 
@@ -256,7 +262,26 @@ impl State {
 
     pub(super) fn send_to(&self, user: UserId, msg: &ServerMsg) {
         if let Some(out) = self.clients.get(&user) {
-            out.push_urgent(encode_packet(msg));
+            let wrapped = match (self.query, msg) {
+                (Some((recipient, id)), ServerMsg::Workspace(event)) if recipient == user => {
+                    QueryResult::from_event(event.clone()).map(|event| {
+                        ServerMsg::Workspace(WorkspaceEvent::QueryReply {
+                            id,
+                            event: Box::new(event),
+                        })
+                    })
+                }
+                _ => None,
+            };
+            let msg = wrapped.as_ref().unwrap_or(msg);
+            if matches!(
+                msg,
+                ServerMsg::Workspace(WorkspaceEvent::State(_) | WorkspaceEvent::Resync { .. })
+            ) {
+                out.push_snapshot(encode_packet(msg));
+            } else {
+                out.push_urgent(encode_packet(msg));
+            }
         }
     }
 

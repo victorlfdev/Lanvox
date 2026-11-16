@@ -610,3 +610,154 @@ fn backup_restore_preserve_data_and_reject_invalid_or_existing_destination() {
     assert!(!destination.exists());
     assert_eq!(std::fs::read(bad).unwrap(), b"not sqlite");
 }
+
+#[test]
+fn small_transactions_survive_restart_and_preserve_atomic_idempotency() {
+    let directory = TestDirectory::new();
+    let path = directory.0.join("deltas.sqlite3");
+    let mut db = Store::open(&path).unwrap();
+    db.import(&state(1), &[]).unwrap();
+    let message = msg(1, 1, 2, 100, "hello");
+    let details = MessageDetails {
+        message: 1,
+        mentions: vec![1],
+        ..Default::default()
+    };
+    db.append_message(&message, Some("first"), &details, None)
+        .unwrap();
+    assert!(db
+        .append_message(&message, Some("must-rollback"), &details, None)
+        .is_err());
+    assert_eq!(db.operation(2, "must-rollback").unwrap(), None);
+    db.set_read(1, 1, 1).unwrap();
+    drop(db);
+    let db = Store::open(&path).unwrap();
+    let saved: serde_json::Value = db.load_state().unwrap().unwrap();
+    assert_eq!(saved["next_message"], 2);
+    assert_eq!(saved["workspace"]["read"], serde_json::json!([[1, 1, 1]]));
+    assert_eq!(
+        saved["workspace"]["last_sends"],
+        serde_json::json!([[2, 1, 100]])
+    );
+    assert_eq!(db.operation(2, "first").unwrap(), Some(1));
+    assert_eq!(db.details(1).unwrap().unwrap().mentions, vec![1]);
+    db.set_read(1, 1, 0).unwrap();
+    db.save_state(&db.load_state::<serde_json::Value>().unwrap().unwrap())
+        .unwrap();
+    let saved: serde_json::Value = db.load_state().unwrap().unwrap();
+    assert_eq!(saved["workspace"]["read"], serde_json::json!([[1, 1, 0]]));
+}
+
+#[test]
+fn attachments_shared_by_messages_live_until_the_last_reference_is_deleted() {
+    let mut db = Store::open(Path::new(":memory:")).unwrap();
+    db.import(&state(1), &[]).unwrap();
+    let info = AttachmentInfo {
+        id: 1,
+        channel: 1,
+        uploader: 2,
+        name: "shared.txt".into(),
+        media_type: "text/plain".into(),
+        size: 3,
+    };
+    db.upload(&info, b"abc", "file", &state(1)).unwrap();
+    for id in 1..=2 {
+        db.append_message(
+            &msg(id, 1, 2, 1, "file"),
+            None,
+            &MessageDetails {
+                message: id,
+                attachments: vec![info.clone()],
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    }
+    db.delete(1, &state(3)).unwrap();
+    assert!(db.attachment_info(1).unwrap().is_some());
+    db.delete(2, &state(3)).unwrap();
+    assert_eq!(db.attachment_bytes().unwrap(), 0);
+    assert!(db.uploaded(2, "file").unwrap().is_none());
+}
+
+#[test]
+fn orphan_collection_preserves_published_attachments_and_releases_abandoned_uploads() {
+    let mut db = Store::open(Path::new(":memory:")).unwrap();
+    db.import(&state(1), &[]).unwrap();
+    for id in 1..=2 {
+        let info = AttachmentInfo {
+            id,
+            channel: 1,
+            uploader: 2,
+            name: "test.txt".into(),
+            media_type: "text/plain".into(),
+            size: 3,
+        };
+        db.upload(&info, b"abc", &format!("file-{id}"), &state(1))
+            .unwrap();
+        if id == 1 {
+            db.append_message(
+                &msg(1, 1, 2, 1, "published"),
+                None,
+                &MessageDetails {
+                    message: 1,
+                    attachments: vec![info],
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        }
+    }
+    db.collect_orphan_attachments(crate::model::now_secs() + 1)
+        .unwrap();
+    assert!(db.attachment_info(1).unwrap().is_some());
+    assert!(db.attachment_info(2).unwrap().is_none());
+    assert_eq!(db.attachment_bytes().unwrap(), 3);
+}
+
+#[test]
+fn version_four_deleted_channels_are_collected_when_migrating() {
+    let directory = TestDirectory::new();
+    let path = directory.0.join("legacy.sqlite3");
+    let mut db = Store::open(&path).unwrap();
+    let mut metadata = state(1);
+    metadata["channels"] =
+        serde_json::json!([{"id":1,"guild":1,"name":"old","kind":"Text","topic":""}]);
+    metadata["workspace"]["initialized"] = serde_json::json!(true);
+    db.import(&metadata, &[]).unwrap();
+    let info = AttachmentInfo {
+        id: 1,
+        channel: 1,
+        uploader: 2,
+        name: "old.txt".into(),
+        media_type: "text/plain".into(),
+        size: 3,
+    };
+    db.upload(&info, b"abc", "legacy-file", &metadata).unwrap();
+    db.append_message(
+        &msg(1, 1, 2, 1, "old content"),
+        None,
+        &MessageDetails {
+            message: 1,
+            attachments: vec![info],
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    metadata["channels"] = serde_json::json!([]);
+    db.connection
+        .execute(
+            "UPDATE host_state SET body=?1",
+            [serde_json::to_vec(&metadata).unwrap()],
+        )
+        .unwrap();
+    db.connection.execute_batch("DROP TRIGGER attachment_created; DROP TRIGGER attachment_deleted; DROP TRIGGER details_attachments_ai; DROP TRIGGER details_attachments_au; DROP TRIGGER details_attachments_ad; DROP TABLE message_attachments; DROP TABLE attachment_retention; DROP TABLE runtime_state; DROP TABLE channel_reads; DROP TABLE last_sends; PRAGMA user_version=4;").unwrap();
+    drop(db);
+    let db = Store::open(&path).unwrap();
+    assert!(db.history(1, None, 100).unwrap().is_empty());
+    assert_eq!(db.attachment_bytes().unwrap(), 0);
+    assert!(db.uploaded(2, "legacy-file").unwrap().is_none());
+}

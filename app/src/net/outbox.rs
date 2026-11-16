@@ -20,7 +20,7 @@ const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Default)]
 struct Lanes {
-    urgent: VecDeque<Vec<u8>>,
+    urgent: VecDeque<(Vec<u8>, bool)>,
     bulk: VecDeque<Vec<u8>>,
     /// Newest pointer update; a newer one replaces it, so it never queues up.
     cursor: Option<Vec<u8>>,
@@ -28,6 +28,7 @@ struct Lanes {
     file: VecDeque<Vec<u8>>,
     closed: bool,
     urgent_bytes: usize,
+    snapshot_bytes: usize,
     file_bytes: usize,
 }
 
@@ -72,8 +73,12 @@ impl Outbox {
                         if lanes.closed {
                             return;
                         }
-                        if let Some(p) = lanes.urgent.pop_front() {
-                            lanes.urgent_bytes -= p.len();
+                        if let Some((p, snapshot)) = lanes.urgent.pop_front() {
+                            if snapshot {
+                                lanes.snapshot_bytes -= p.len();
+                            } else {
+                                lanes.urgent_bytes -= p.len();
+                            }
                             break p;
                         }
                         if let Some(p) = lanes.cursor.take() {
@@ -113,7 +118,25 @@ impl Outbox {
             return;
         }
         lanes.urgent_bytes += packet.len();
-        lanes.urgent.push_back(packet);
+        lanes.urgent.push_back((packet, false));
+        cv.notify_one();
+    }
+    /// State has a separate, protocol-sized budget and keeps FIFO order with control packets.
+    pub fn push_snapshot(&self, packet: Vec<u8>) {
+        let (lock, cv) = &*self.inner;
+        let mut lanes = lock.lock();
+        if lanes.closed {
+            return;
+        }
+        if lanes.urgent.len() >= MAX_URGENT
+            || lanes.snapshot_bytes.saturating_add(packet.len()) > crate::protocol::MAX_PACKET + 4
+        {
+            drop(lanes);
+            self.close();
+            return;
+        }
+        lanes.snapshot_bytes += packet.len();
+        lanes.urgent.push_back((packet, true));
         cv.notify_one();
     }
 
@@ -188,6 +211,7 @@ impl Outbox {
             lanes.file.clear();
             lanes.cursor = None;
             lanes.urgent_bytes = 0;
+            lanes.snapshot_bytes = 0;
             lanes.file_bytes = 0;
         }
         let _ = self.socket.shutdown(std::net::Shutdown::Both);
@@ -223,8 +247,9 @@ impl Outbox {
             .unwrap_or_default();
         if !stats.active {
             let lanes = self.inner.0.lock();
-            stats.queued_bytes =
-                lanes.urgent_bytes + lanes.bulk.iter().map(Vec::len).sum::<usize>();
+            stats.queued_bytes = lanes.urgent_bytes
+                + lanes.snapshot_bytes
+                + lanes.bulk.iter().map(Vec::len).sum::<usize>();
         }
         stats
     }
@@ -278,5 +303,23 @@ mod tests {
         outbox.push_urgent(vec![0; MAX_URGENT_BYTES + 1]);
         assert!(outbox.is_closed());
         assert!(outbox.inner.0.lock().urgent.is_empty());
+    }
+    #[test]
+    fn a_valid_large_snapshot_has_its_own_budget_and_preserves_control_order() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let outbox = Outbox::start(socket);
+        outbox.push_snapshot(vec![7; 20 * 1024 * 1024]);
+        outbox.push_urgent(vec![9]);
+        assert!(!outbox.is_closed());
+        let mut bytes = vec![0; 20 * 1024 * 1024 + 1];
+        peer.read_exact(&mut bytes).unwrap();
+        assert_eq!(bytes[0], 7);
+        assert_eq!(bytes[20 * 1024 * 1024 - 1], 7);
+        assert_eq!(*bytes.last().unwrap(), 9);
+        outbox.close();
     }
 }

@@ -24,6 +24,7 @@ mod capture;
 mod dsp;
 mod engine;
 mod mixer;
+mod output_ring;
 mod playback;
 pub mod voice_note;
 use capture::*;
@@ -153,6 +154,7 @@ pub struct Mixer {
     pub deafened: AtomicBool,
     output_volume: AtomicU32,
     device_fault: AtomicBool,
+    pub underrun_frames: std::sync::atomic::AtomicU64,
     processor: Mutex<Option<Arc<super::processing::AudioProcessor>>>,
 }
 

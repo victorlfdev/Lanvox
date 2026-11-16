@@ -2,6 +2,23 @@ use super::*;
 
 impl LanvoxApp {
     pub fn connect(&mut self, ctx: &egui::Context, address: String) -> bool {
+        self.connect_using(ctx, address, None)
+    }
+
+    pub fn connect_from_form(&mut self, ctx: &egui::Context, address: String) -> bool {
+        let supplied = crate::settings::HostCredentials {
+            access_token: self.settings.access_token.clone(),
+            expected_fingerprint: self.settings.expected_host.clone(),
+        };
+        self.connect_using(ctx, address, Some(supplied))
+    }
+
+    fn connect_using(
+        &mut self,
+        ctx: &egui::Context,
+        address: String,
+        mut supplied: Option<crate::settings::HostCredentials>,
+    ) -> bool {
         if self.connection_pending.is_some() {
             return false;
         }
@@ -18,12 +35,14 @@ impl LanvoxApp {
                     return false;
                 }
             };
+            let mut credentials = self.settings.credentials_for(&link.address);
             if let Some(token) = link.token {
-                self.settings.access_token = token;
+                credentials.access_token = token;
             }
             if let Some(fingerprint) = link.fingerprint {
-                self.settings.expected_host = fingerprint;
+                credentials.expected_fingerprint = fingerprint;
             }
+            supplied = Some(credentials);
             if let Some((channel, message)) = link.message {
                 self.pending_message = Some((
                     crate::settings::host_address(&link.address),
@@ -60,6 +79,9 @@ impl LanvoxApp {
             ));
             return false;
         }
+        let credentials = supplied.unwrap_or_else(|| self.settings.credentials_for(&address));
+        self.settings.access_token = credentials.access_token;
+        self.settings.expected_host = credentials.expected_fingerprint;
         self.connecting = true;
         self.join_error = None;
         self.reconnect_at = None;

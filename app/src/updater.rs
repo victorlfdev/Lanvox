@@ -385,7 +385,10 @@ mod client {
             if announced.as_deref() != Some(manifest.version.as_str()) {
                 crate::notifications::notify(
                     "Nova versão do Lanvox",
-                    &format!("A versão {} está disponível. Abra o app para atualizar.", manifest.version),
+                    &format!(
+                        "A versão {} está disponível. Abra o app para atualizar.",
+                        manifest.version
+                    ),
                 );
                 *announced = Some(manifest.version);
             }

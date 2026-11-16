@@ -203,6 +203,9 @@ pub fn fill(app: &mut LanvoxApp) {
         viewers: HashMap::new(),
         workspace: WorkspaceSnapshot::default(),
         history_more: HashMap::new(),
+        history_after: HashSet::new(),
+        message_windows: HashMap::new(),
+        avatar_revisions: HashMap::new(),
         history_loading: HashSet::new(),
     };
     view.channels.push(Channel {

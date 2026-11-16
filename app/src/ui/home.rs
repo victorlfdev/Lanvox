@@ -41,7 +41,7 @@ if ui.small_button("Remover").clicked(){app.settings.favorites.retain(|f|f!=&fav
     let discovered=app.discovery.as_ref().map(|d|d.list()).unwrap_or_default();
     if !discovered.is_empty(){ui.separator();ui.label("Encontrados na LAN");for host in discovered{if ui.button(format!("{} · {}",host.name,host.address)).clicked(){join=Some(host.address);}}}
     else{ui.label(RichText::new("Na VPN, use o endereço acima. A busca automática depende de broadcast local.").small().color(theme::color(theme::TEXT_MUTED)));}
-    if let Some(address)=join{app.connect(&ctx,address);}
+    if let Some(address)=join{app.connect_from_form(&ctx,address);}
    });
    ui.add_space(20.0);
    ui.heading(if app.hosted.is_some(){"Servidor em execução neste computador"}else{"Hospedar neste computador"});

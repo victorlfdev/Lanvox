@@ -20,6 +20,8 @@ pub const MAX_MESSAGE_CHARS: usize = 2000;
 pub const GROUP_WINDOW_SECS: i64 = 7 * 60;
 
 pub const MAX_ATTACHMENT_BYTES: usize = 100 * 1024 * 1024;
+/// Maximum attachments accepted in a single message, shared by client and host.
+pub const MAX_MESSAGE_ATTACHMENTS: usize = 8;
 /// Largest file the single-message `Upload`/`Download` commands still carry; anything bigger
 /// travels in `ATTACHMENT_CHUNK_BYTES` pieces (`UploadBegin`/`UploadChunk`/`DownloadChunk`).
 pub const MAX_INLINE_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
@@ -397,6 +399,125 @@ pub enum WorkspaceCommand {
         size: u64,
         digest: [u8; 32],
     },
+    Query {
+        id: u64,
+        command: Box<QueryCommand>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum QueryCommand {
+    History {
+        channel: ChannelId,
+        before: Option<MessageId>,
+        limit: u16,
+    },
+    SearchAdvanced(SearchRequest),
+    Inbox {
+        mentions_only: bool,
+        before: Option<MessageId>,
+        limit: u16,
+    },
+    Pinned {
+        channel: ChannelId,
+    },
+    Context {
+        channel: ChannelId,
+        message: MessageId,
+        limit: u16,
+    },
+    After {
+        channel: ChannelId,
+        after: MessageId,
+        limit: u16,
+    },
+}
+impl QueryCommand {
+    pub fn into_command(self) -> WorkspaceCommand {
+        match self {
+            Self::History {
+                channel,
+                before,
+                limit,
+            } => WorkspaceCommand::History {
+                channel,
+                before,
+                limit,
+            },
+            Self::SearchAdvanced(request) => WorkspaceCommand::SearchAdvanced(request),
+            Self::Inbox {
+                mentions_only,
+                before,
+                limit,
+            } => WorkspaceCommand::Inbox {
+                mentions_only,
+                before,
+                limit,
+            },
+            Self::Pinned { channel } => WorkspaceCommand::Pinned { channel },
+            Self::Context {
+                channel,
+                message,
+                limit,
+            } => WorkspaceCommand::Community(CommunityCommand::MessageContext {
+                channel,
+                message,
+                limit,
+            }),
+            Self::After {
+                channel,
+                after,
+                limit,
+            } => WorkspaceCommand::Community(CommunityCommand::HistoryAfter {
+                channel,
+                after,
+                limit,
+            }),
+        }
+    }
+    pub fn from_command(command: WorkspaceCommand) -> Option<Self> {
+        Some(match command {
+            WorkspaceCommand::History {
+                channel,
+                before,
+                limit,
+            } => Self::History {
+                channel,
+                before,
+                limit,
+            },
+            WorkspaceCommand::SearchAdvanced(request) => Self::SearchAdvanced(request),
+            WorkspaceCommand::Inbox {
+                mentions_only,
+                before,
+                limit,
+            } => Self::Inbox {
+                mentions_only,
+                before,
+                limit,
+            },
+            WorkspaceCommand::Pinned { channel } => Self::Pinned { channel },
+            WorkspaceCommand::Community(CommunityCommand::MessageContext {
+                channel,
+                message,
+                limit,
+            }) => Self::Context {
+                channel,
+                message,
+                limit,
+            },
+            WorkspaceCommand::Community(CommunityCommand::HistoryAfter {
+                channel,
+                after,
+                limit,
+            }) => Self::After {
+                channel,
+                after,
+                limit,
+            },
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -524,6 +645,220 @@ pub enum WorkspaceEvent {
         operation: String,
         received: u64,
     },
+    /// Transfer bandwidth backpressure; the same offset may be retried after this delay.
+    DownloadDeferred {
+        attachment: u64,
+        offset: u64,
+        retry_millis: u16,
+    },
+    QueryReply {
+        id: u64,
+        event: Box<QueryResult>,
+    },
+    ProfileUpdated(Profile),
+    DownloadFailed {
+        attachment: u64,
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum QueryResult {
+    History {
+        channel: ChannelId,
+        messages: Vec<Message>,
+        details: Vec<MessageDetails>,
+        has_more: bool,
+    },
+    SearchPage {
+        query: String,
+        messages: Vec<Message>,
+        details: Vec<MessageDetails>,
+        offset: u32,
+        has_more: bool,
+    },
+    Inbox {
+        mentions_only: bool,
+        before: Option<MessageId>,
+        messages: Vec<Message>,
+        has_more: bool,
+    },
+    Pinned {
+        channel: ChannelId,
+        messages: Vec<Message>,
+        details: Vec<MessageDetails>,
+    },
+    Context {
+        channel: ChannelId,
+        message: MessageId,
+        messages: Vec<Message>,
+        details: Vec<MessageDetails>,
+        has_before: bool,
+        has_after: bool,
+    },
+    After {
+        channel: ChannelId,
+        messages: Vec<Message>,
+        details: Vec<MessageDetails>,
+        has_after: bool,
+    },
+    Error(String),
+}
+impl QueryResult {
+    pub fn from_event(event: WorkspaceEvent) -> Option<Self> {
+        Some(match event {
+            WorkspaceEvent::History {
+                channel,
+                messages,
+                details,
+                has_more,
+            } => Self::History {
+                channel,
+                messages,
+                details,
+                has_more,
+            },
+            WorkspaceEvent::SearchPage {
+                query,
+                messages,
+                details,
+                offset,
+                has_more,
+            } => Self::SearchPage {
+                query,
+                messages,
+                details,
+                offset,
+                has_more,
+            },
+            WorkspaceEvent::InboxPage {
+                mentions_only,
+                before,
+                messages,
+                has_more,
+            } => Self::Inbox {
+                mentions_only,
+                before,
+                messages,
+                has_more,
+            },
+            WorkspaceEvent::Pinned {
+                channel,
+                messages,
+                details,
+            } => Self::Pinned {
+                channel,
+                messages,
+                details,
+            },
+            WorkspaceEvent::Community(CommunityEvent::Context {
+                channel,
+                message,
+                messages,
+                details,
+                has_before,
+                has_after,
+            }) => Self::Context {
+                channel,
+                message,
+                messages,
+                details,
+                has_before,
+                has_after,
+            },
+            WorkspaceEvent::Community(CommunityEvent::AfterHistory {
+                channel,
+                messages,
+                details,
+                has_after,
+            }) => Self::After {
+                channel,
+                messages,
+                details,
+                has_after,
+            },
+            WorkspaceEvent::Error { reason, .. } => Self::Error(reason),
+            _ => return None,
+        })
+    }
+    pub fn into_event(self) -> WorkspaceEvent {
+        match self {
+            Self::History {
+                channel,
+                messages,
+                details,
+                has_more,
+            } => WorkspaceEvent::History {
+                channel,
+                messages,
+                details,
+                has_more,
+            },
+            Self::SearchPage {
+                query,
+                messages,
+                details,
+                offset,
+                has_more,
+            } => WorkspaceEvent::SearchPage {
+                query,
+                messages,
+                details,
+                offset,
+                has_more,
+            },
+            Self::Inbox {
+                mentions_only,
+                before,
+                messages,
+                has_more,
+            } => WorkspaceEvent::InboxPage {
+                mentions_only,
+                before,
+                messages,
+                has_more,
+            },
+            Self::Pinned {
+                channel,
+                messages,
+                details,
+            } => WorkspaceEvent::Pinned {
+                channel,
+                messages,
+                details,
+            },
+            Self::Context {
+                channel,
+                message,
+                messages,
+                details,
+                has_before,
+                has_after,
+            } => WorkspaceEvent::Community(CommunityEvent::Context {
+                channel,
+                message,
+                messages,
+                details,
+                has_before,
+                has_after,
+            }),
+            Self::After {
+                channel,
+                messages,
+                details,
+                has_after,
+            } => WorkspaceEvent::Community(CommunityEvent::AfterHistory {
+                channel,
+                messages,
+                details,
+                has_after,
+            }),
+            Self::Error(reason) => WorkspaceEvent::Error {
+                operation: None,
+                reason,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

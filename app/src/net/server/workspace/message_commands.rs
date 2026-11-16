@@ -105,7 +105,14 @@ impl State {
                 d.edited = Some(now_secs());
                 d.mentions = mentions;
                 let result = if let Some(store) = &self.store {
-                    store.lock().update(&message, &self.saved(false))
+                    store.lock().edit_message(
+                        &message,
+                        self.workspace
+                            .details
+                            .iter()
+                            .find(|d| d.message == message.id)
+                            .expect("edited details"),
+                    )
                 } else {
                     Ok(())
                 };
@@ -121,10 +128,12 @@ impl State {
                 }
                 let details = self.detail_mut(message.id).clone();
                 let details = self.with_reply_preview(details);
+                let channel = message.channel;
                 self.send_channel(
-                    message.channel,
+                    channel,
                     &ServerMsg::Workspace(WorkspaceEvent::MessageChanged { message, details }),
                 );
+                self.broadcast_unread(channel);
             }
             WorkspaceCommand::Delete { message } => {
                 let m = self.find_message(message)?;
@@ -147,6 +156,22 @@ impl State {
                 }
                 self.messages.retain(|m| m.id != message);
                 if self.store.is_none() {
+                    let referenced: HashSet<_> = self
+                        .workspace
+                        .details
+                        .iter()
+                        .flat_map(|d| d.attachments.iter().map(|a| a.id))
+                        .collect();
+                    let deleted: HashSet<_> = previous
+                        .details
+                        .iter()
+                        .filter(|d| d.message == message)
+                        .flat_map(|d| d.attachments.iter().map(|a| a.id))
+                        .collect();
+                    self.uploads
+                        .retain(|id, _| !deleted.contains(id) || referenced.contains(id));
+                }
+                if self.store.is_none() {
                     self.persist_workspace(previous)?;
                 }
                 self.send_channel(
@@ -156,6 +181,7 @@ impl State {
                         message,
                     }),
                 );
+                self.broadcast_unread(m.channel);
             }
             WorkspaceCommand::React { message, emoji } => {
                 let m = self.find_message(message)?;
@@ -209,7 +235,20 @@ impl State {
                     });
                 }
                 d.reactions.retain(|r| !r.users.is_empty());
-                self.persist_workspace(previous)?;
+                if let Some(store) = &self.store {
+                    let details = self
+                        .workspace
+                        .details
+                        .iter()
+                        .find(|d| d.message == message)
+                        .expect("message details");
+                    if let Err(error) = store.lock().set_details(details) {
+                        self.workspace = previous;
+                        return Err(error);
+                    }
+                } else {
+                    self.persist_workspace(previous)?;
+                }
                 let details = self.detail_mut(message).clone();
                 let details = self.with_reply_preview(details);
                 self.send_channel(
@@ -228,7 +267,20 @@ impl State {
                 )?;
                 let previous = self.workspace.clone();
                 self.detail_mut(message).pinned = pinned;
-                self.persist_workspace(previous)?;
+                if let Some(store) = &self.store {
+                    let details = self
+                        .workspace
+                        .details
+                        .iter()
+                        .find(|d| d.message == message)
+                        .expect("message details");
+                    if let Err(error) = store.lock().set_details(details) {
+                        self.workspace = previous;
+                        return Err(error);
+                    }
+                } else {
+                    self.persist_workspace(previous)?;
+                }
                 let details = self.detail_mut(message).clone();
                 let details = self.with_reply_preview(details);
                 self.send_channel(
@@ -245,18 +297,28 @@ impl State {
                     self.find_message(message)?.channel == channel,
                     "Cursor inválido",
                 )?;
-                let previous = self.workspace.clone();
-                if let Some((_, _, cursor)) = self
+                let message = self
                     .workspace
                     .read
-                    .iter_mut()
+                    .iter()
                     .find(|(u, c, _)| *u == user && *c == channel)
-                {
-                    *cursor = (*cursor).max(message);
-                } else {
-                    self.workspace.read.push((user, channel, message));
+                    .map(|(_, _, cursor)| (*cursor).max(message))
+                    .unwrap_or(message);
+                if let Some(store) = &self.store {
+                    store.lock().set_read(user, channel, message)?;
                 }
-                self.persist_workspace(previous)?;
+                let previous = if self.store.is_none() {
+                    Some(self.workspace.clone())
+                } else {
+                    None
+                };
+                self.workspace
+                    .read
+                    .retain(|(u, c, _)| *u != user || *c != channel);
+                self.workspace.read.push((user, channel, message));
+                if let Some(previous) = previous {
+                    self.persist_workspace(previous)?;
+                }
                 self.send_to(
                     user,
                     &ServerMsg::Workspace(WorkspaceEvent::Read { channel, message }),

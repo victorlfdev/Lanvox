@@ -18,13 +18,18 @@ fn draft_directory(identity: &str, host: &str) -> std::io::Result<std::path::Pat
     Ok(root.join(name))
 }
 
-fn draft_path(identity: &str, host: &str, operation: &str) -> std::io::Result<std::path::PathBuf> {
+fn validate_operation(operation: &str) -> std::io::Result<()> {
     if !operation.starts_with("upload-")
         || operation.len() != 39
         || !operation[7..].bytes().all(|b| b.is_ascii_hexdigit())
     {
         return Err(std::io::Error::other("Identificador de anexo inválido"));
     }
+    Ok(())
+}
+
+fn draft_path(identity: &str, host: &str, operation: &str) -> std::io::Result<std::path::PathBuf> {
+    validate_operation(operation)?;
     Ok(draft_directory(identity, host)?.join(format!("{operation}.draft")))
 }
 
@@ -41,17 +46,101 @@ fn write_draft(
             .ok_or_else(|| std::io::Error::other("Pasta inválida"))?,
     )?;
     let metadata = serde_json::to_vec(&(channel, &file.name)).map_err(std::io::Error::other)?;
-    let temp = path.with_extension("partial");
-    let mut out = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
+    let mut out = crate::file_transfer::AtomicFile::new(&path)?;
     out.write_all(&(metadata.len() as u32).to_le_bytes())?;
     out.write_all(&metadata)?;
     out.write_all(&file.bytes)?;
-    out.sync_all()?;
-    drop(out);
-    std::fs::rename(temp, path)
+    out.commit()?;
+    Ok(())
+}
+pub(super) fn migrate_attachment_drafts(
+    receipt: &crate::settings::IdentityMigration,
+) -> std::io::Result<()> {
+    copy_draft_directory(
+        &draft_directory(&receipt.old_identity, &receipt.host)?,
+        &draft_directory(&receipt.new_identity, &receipt.host)?,
+    )
+}
+
+fn file_hash(path: &std::path::Path) -> std::io::Result<[u8; 32]> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = [0u8; 128 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    let mut digest = [0; 32];
+    digest.copy_from_slice(hash.finish().as_ref());
+    Ok(digest)
+}
+
+fn copy_draft_directory(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    if !source.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file()
+            || entry.path().extension().and_then(|e| e.to_str()) != Some("draft")
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Some(operation) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        validate_operation(operation)?;
+        if entry.metadata()?.len() > MAX_ATTACHMENT_BYTES as u64 + 8196 {
+            return Err(std::io::Error::other("Rascunho excede o limite"));
+        }
+        let target = destination.join(format!("{operation}.draft"));
+        if target.exists() {
+            if file_hash(&target)? != file_hash(&path)? {
+                return Err(std::io::Error::other(
+                    "Conflito ao recuperar rascunho de anexo",
+                ));
+            }
+        } else {
+            let mut output = crate::file_transfer::AtomicFile::new(&target)?;
+            std::io::copy(&mut std::fs::File::open(&path)?, &mut output)?;
+            output.commit()?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn prune_migrated_drafts(receipt: &crate::settings::IdentityMigration) {
+    let (Ok(source), Ok(destination)) = (
+        draft_directory(&receipt.old_identity, &receipt.host),
+        draft_directory(&receipt.new_identity, &receipt.host),
+    ) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&source) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("draft") {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
+        if let (Ok(old), Ok(new)) = (file_hash(&path), file_hash(&target)) {
+            if old == new {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(source);
 }
 
 impl LanvoxApp {
@@ -60,31 +149,10 @@ impl LanvoxApp {
             self.notify("O arquivo está vazio ou ultrapassa o limite de 100 MiB.");
             return;
         }
-        let staged_bytes: usize = self
-            .workspace_ui
-            .staged
-            .values()
-            .flatten()
-            .map(|f| f.bytes.len())
-            .sum();
-        if staged_bytes + bytes.len() > 2 * MAX_ATTACHMENT_BYTES {
-            self.notify("Muitos arquivos grandes aguardando envio. Envie os atuais primeiro.");
-            return;
-        }
-        let total = self.workspace_ui.staged.get(&channel).map_or(0, Vec::len)
-            + self
-                .workspace_ui
-                .attachments
-                .get(&channel)
-                .map_or(0, Vec::len)
-            + self
-                .workspace_ui
-                .uploads
-                .values()
-                .filter(|ch| **ch == channel)
-                .count();
-        if total >= 10 {
-            self.notify("Anexe até 10 arquivos por mensagem.");
+        if !self.workspace_ui.can_stage(channel, bytes.len()) {
+            self.notify(
+                "Limite de anexos atingido ou preparação em andamento. Envie os atuais primeiro.",
+            );
             return;
         }
         let file = StagedAttachment {
@@ -92,19 +160,98 @@ impl LanvoxApp {
             name,
             bytes,
             preview: None,
+            digest: [0; 32],
         };
-        if let Err(error) = write_draft(&self.local_identity, &self.current_host(), channel, &file)
-        {
-            self.notify(format!(
-                "Não foi possível preservar o anexo neste dispositivo: {error}"
-            ));
-            return;
-        }
+        let identity = self.local_identity.clone();
+        let host = self.current_host();
+        let bytes = file.bytes.len();
+        let (tx, receiver) = bounded(1);
+        self.workspace_ui.draft_pending.push(PendingDraft {
+            channel,
+            bytes,
+            receiver,
+        });
+        std::thread::spawn(move || {
+            let mut file = file;
+            file.digest
+                .copy_from_slice(ring::digest::digest(&ring::digest::SHA256, &file.bytes).as_ref());
+            let result = write_draft(&identity, &host, channel, &file)
+                .map(|_| file)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+    }
+    pub(super) fn poll_draft_tasks(&mut self) {
+        let mut completed = Vec::new();
         self.workspace_ui
-            .staged
-            .entry(channel)
-            .or_default()
-            .push(file);
+            .draft_pending
+            .retain(|pending| match pending.receiver.try_recv() {
+                Ok(result) => {
+                    completed.push((pending.channel, result));
+                    false
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    completed.push((
+                        pending.channel,
+                        Err("A preparação do arquivo foi interrompida".into()),
+                    ));
+                    false
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => true,
+            });
+        for (channel, result) in completed {
+            match result {
+                Ok(file) => self
+                    .workspace_ui
+                    .staged
+                    .entry(channel)
+                    .or_default()
+                    .push(file),
+                Err(error) => self.notify(format!("Não foi possível preservar o anexo: {error}")),
+            }
+        }
+        if let Some(receiver) = &self.workspace_ui.draft_restore {
+            match receiver.try_recv() {
+                Ok(files) => {
+                    self.workspace_ui.draft_restore = None;
+                    for (channel, file) in files {
+                        let queued = self.settings.draft_is_queued(
+                            &self.local_identity,
+                            &self.current_host(),
+                            &file.operation,
+                        );
+                        let exists =
+                            draft_path(&self.local_identity, &self.current_host(), &file.operation)
+                                .is_ok_and(|path| path.exists());
+                        if queued || !exists {
+                            continue;
+                        }
+                        if !self
+                            .workspace_ui
+                            .staged
+                            .values()
+                            .flatten()
+                            .any(|f| f.operation == file.operation)
+                            && !self
+                                .workspace_ui
+                                .upload_sources
+                                .contains_key(&file.operation)
+                        {
+                            self.workspace_ui
+                                .staged
+                                .entry(channel)
+                                .or_default()
+                                .push(file);
+                        }
+                    }
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.workspace_ui.draft_restore = None;
+                    self.notify("A recuperação de anexos foi interrompida.");
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+            }
+        }
     }
 
     pub fn remove_attachment_draft(&self, operation: &str) {
@@ -113,129 +260,117 @@ impl LanvoxApp {
         }
     }
 
-    fn clear_sent_attachment_drafts(&self, channel: ChannelId) {
-        use std::io::Read;
-        let Ok(dir) = draft_directory(&self.local_identity, &self.current_host()) else {
-            return;
-        };
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(operation) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if path.extension().and_then(|s| s.to_str()) != Some("draft")
-                || draft_path(&self.local_identity, &self.current_host(), operation).is_err()
-            {
-                continue;
-            }
-            let Ok(mut source) = std::fs::File::open(&path) else {
-                continue;
-            };
-            let mut header = [0; 4];
-            if source.read_exact(&mut header).is_err() {
-                continue;
-            }
-            let len = u32::from_le_bytes(header) as usize;
-            if len > 8192 {
-                continue;
-            }
-            let mut metadata = vec![0; len];
-            if source.read_exact(&mut metadata).is_ok()
-                && serde_json::from_slice::<(ChannelId, String)>(&metadata)
-                    .is_ok_and(|(id, _)| id == channel)
-            {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-
     /// Restore only this identity's drafts. Bounds protect memory even if files were modified.
     pub fn restore_attachment_drafts(&mut self) {
-        use std::io::Read;
-        let Ok(dir) = draft_directory(&self.local_identity, &self.current_host()) else {
+        if self.workspace_ui.draft_restore.is_some() {
             return;
-        };
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        let mut total: usize = self
+        }
+        let identity = self.local_identity.clone();
+        let host = self.current_host();
+        let initial_bytes: usize = self
             .workspace_ui
             .staged
             .values()
             .flatten()
             .map(|f| f.bytes.len())
             .sum();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(operation) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
-            else {
-                continue;
-            };
-            if path.extension().and_then(|s| s.to_str()) != Some("draft")
-                || draft_path(&self.local_identity, &self.current_host(), &operation).is_err()
-                || self
-                    .workspace_ui
-                    .staged
-                    .values()
-                    .flatten()
-                    .any(|f| f.operation == operation)
-                || self.workspace_ui.upload_sources.contains_key(&operation)
-            {
-                continue;
-            }
-            let Ok(mut source) = std::fs::File::open(&path) else {
-                continue;
-            };
-            let Ok(meta) = source.metadata() else {
-                continue;
-            };
-            if meta.len() > MAX_ATTACHMENT_BYTES as u64 + 8196 {
-                continue;
-            }
-            let mut header = [0; 4];
-            if source.read_exact(&mut header).is_err() {
-                continue;
-            }
-            let len = u32::from_le_bytes(header) as usize;
-            if len > 8192 {
-                continue;
-            }
-            let mut metadata = vec![0; len];
-            if source.read_exact(&mut metadata).is_err() {
-                continue;
-            }
-            let Ok((channel, name)) = serde_json::from_slice::<(ChannelId, String)>(&metadata)
-            else {
-                continue;
-            };
-            let mut bytes = Vec::new();
-            if source.read_to_end(&mut bytes).is_err()
-                || bytes.is_empty()
-                || bytes.len() > MAX_ATTACHMENT_BYTES
-                || total.saturating_add(bytes.len()) > 2 * MAX_ATTACHMENT_BYTES
-                || self
-                    .workspace_ui
-                    .staged
-                    .get(&channel)
-                    .is_some_and(|files| files.len() >= 10)
-            {
-                continue;
-            }
-            total += bytes.len();
-            self.workspace_ui
-                .staged
-                .entry(channel)
-                .or_default()
-                .push(StagedAttachment {
-                    operation,
-                    name,
-                    bytes,
-                    preview: None,
-                });
-        }
+        let known: HashSet<_> = self
+            .workspace_ui
+            .staged
+            .values()
+            .flatten()
+            .map(|f| f.operation.clone())
+            .chain(self.workspace_ui.upload_sources.keys().cloned())
+            .collect();
+        let (tx, rx) = bounded(1);
+        self.workspace_ui.draft_restore = Some(rx);
+        std::thread::spawn(move || {
+            let mut files: Vec<(ChannelId, StagedAttachment)> = Vec::new();
+            (|| {
+                use std::io::Read;
+                let Ok(dir) = draft_directory(&identity, &host) else {
+                    return;
+                };
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    return;
+                };
+                let mut total = initial_bytes;
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let Some(operation) =
+                        path.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    if path.extension().and_then(|s| s.to_str()) != Some("draft")
+                        || draft_path(&identity, &host, &operation).is_err()
+                        || known.contains(&operation)
+                    {
+                        continue;
+                    }
+                    let Ok(mut source) = std::fs::File::open(&path) else {
+                        continue;
+                    };
+                    let Ok(meta) = source.metadata() else {
+                        continue;
+                    };
+                    if meta.len() > MAX_ATTACHMENT_BYTES as u64 + 8196 {
+                        continue;
+                    }
+                    let mut header = [0; 4];
+                    if source.read_exact(&mut header).is_err() {
+                        continue;
+                    }
+                    let len = u32::from_le_bytes(header) as usize;
+                    if len > 8192 {
+                        continue;
+                    }
+                    let mut metadata = vec![0; len];
+                    if source.read_exact(&mut metadata).is_err() {
+                        continue;
+                    }
+                    let Ok((channel, name)) =
+                        serde_json::from_slice::<(ChannelId, String)>(&metadata)
+                    else {
+                        continue;
+                    };
+                    if meta.len().saturating_sub(4 + len as u64)
+                        > (2 * MAX_ATTACHMENT_BYTES).saturating_sub(total) as u64
+                    {
+                        continue;
+                    }
+                    let mut bytes = Vec::new();
+                    if source
+                        .take(MAX_ATTACHMENT_BYTES as u64 + 1)
+                        .read_to_end(&mut bytes)
+                        .is_err()
+                        || bytes.is_empty()
+                        || bytes.len() > MAX_ATTACHMENT_BYTES
+                        || total.saturating_add(bytes.len()) > 2 * MAX_ATTACHMENT_BYTES
+                        || files.iter().filter(|(ch, _)| *ch == channel).count()
+                            >= MAX_MESSAGE_ATTACHMENTS
+                    {
+                        continue;
+                    }
+                    total += bytes.len();
+                    let mut digest = [0; 32];
+                    digest.copy_from_slice(
+                        ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref(),
+                    );
+                    files.push((
+                        channel,
+                        StagedAttachment {
+                            operation,
+                            name,
+                            bytes,
+                            preview: None,
+                            digest,
+                        },
+                    ));
+                }
+            })();
+            let _ = tx.send(files);
+        });
     }
 
     pub fn upload_staged(&mut self, channel: ChannelId, index: usize) {
@@ -282,9 +417,7 @@ impl LanvoxApp {
                     finishing: false,
                 },
             );
-            let hash = ring::digest::digest(&ring::digest::SHA256, &file.bytes);
-            let mut digest = [0; 32];
-            digest.copy_from_slice(hash.as_ref());
+            let digest = file.digest;
             self.workspace(WorkspaceCommand::UploadBeginResumable {
                 operation: operation.clone(),
                 channel,
@@ -402,6 +535,15 @@ impl LanvoxApp {
         for channel in channels {
             if self
                 .workspace_ui
+                .draft_pending
+                .iter()
+                .any(|p| p.channel == channel)
+                || self.workspace_ui.draft_restore.is_some()
+            {
+                continue;
+            }
+            if self
+                .workspace_ui
                 .staged
                 .get(&channel)
                 .is_some_and(|files| !files.is_empty())
@@ -424,7 +566,7 @@ impl LanvoxApp {
             }
             None => batch.text.trim().into(),
         };
-        let attachments = self
+        let attachments: Vec<u64> = self
             .workspace_ui
             .attachments
             .get(&channel)
@@ -437,6 +579,10 @@ impl LanvoxApp {
             channel,
             text,
             reply_to: batch.reply_to,
+            attachment_drafts: attachments
+                .iter()
+                .filter_map(|id| self.workspace_ui.upload_receipts.get(id).cloned())
+                .collect(),
             attachments,
             error: None,
             attempted_at: now_secs(),
@@ -447,7 +593,6 @@ impl LanvoxApp {
             self.notify(format!("Não foi possível preservar o envio: {error}. Os arquivos e o texto continuam aqui."));
             return;
         }
-        self.clear_sent_attachment_drafts(channel);
         self.send_pending(&pending);
         if self.compose.get(&channel) == Some(&batch.text) {
             self.compose.insert(channel, String::new());
@@ -461,22 +606,35 @@ impl LanvoxApp {
     }
 
     pub fn stage_paths(&mut self, channel: ChannelId, paths: Vec<std::path::PathBuf>) {
-        if self.file_pending.is_some() {
+        if self.file_pending.is_some() || self.workspace_ui.draft_restore.is_some() {
             self.notify("Aguarde o arquivo atual antes de anexar outro.");
             return;
         }
         let (tx, rx) = bounded(1);
         self.file_pending = Some(rx);
+        let occupied = self.workspace_ui.attachment_count(channel);
+        let mut remaining =
+            (2 * MAX_ATTACHMENT_BYTES).saturating_sub(self.workspace_ui.attachment_bytes());
+        self.workspace_ui.file_read_reserved = remaining;
         std::thread::spawn(move || {
             let mut files = Vec::new();
-            for path in paths.into_iter().take(10) {
+            for path in paths
+                .into_iter()
+                .take(MAX_MESSAGE_ATTACHMENTS.saturating_sub(occupied))
+            {
                 let task = (|| -> Result<(String, Vec<u8>), String> {
                     let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
-                    if !meta.is_file() || meta.len() > MAX_ATTACHMENT_BYTES as u64 {
+                    if !meta.is_file() || meta.len() > MAX_ATTACHMENT_BYTES.min(remaining) as u64 {
                         return Err("Escolha arquivos de até 100 MiB.".into());
                     }
-                    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                    if bytes.len() > MAX_ATTACHMENT_BYTES {
+                    use std::io::Read;
+                    let mut bytes = Vec::new();
+                    std::fs::File::open(&path)
+                        .map_err(|e| e.to_string())?
+                        .take(MAX_ATTACHMENT_BYTES.min(remaining) as u64 + 1)
+                        .read_to_end(&mut bytes)
+                        .map_err(|e| e.to_string())?;
+                    if bytes.len() > MAX_ATTACHMENT_BYTES.min(remaining) {
                         return Err("O arquivo ultrapassa 100 MiB.".into());
                     }
                     Ok((
@@ -488,7 +646,10 @@ impl LanvoxApp {
                     ))
                 })();
                 match task {
-                    Ok(file) => files.push(file),
+                    Ok(file) => {
+                        remaining -= file.1.len();
+                        files.push(file);
+                    }
                     Err(error) => {
                         let _ = tx.send(FileTask::Error(error));
                         return;
@@ -539,6 +700,10 @@ impl LanvoxApp {
         if self.file_pending.is_some() {
             return;
         }
+        let remaining = (2 * MAX_ATTACHMENT_BYTES)
+            .saturating_sub(self.workspace_ui.attachment_bytes())
+            .min(MAX_ATTACHMENT_BYTES);
+        self.workspace_ui.file_read_reserved = remaining;
         let (tx, rx) = bounded(1);
         self.file_pending = Some(rx);
         std::thread::spawn(move || {
@@ -547,23 +712,19 @@ impl LanvoxApp {
                 .pick_file()
             {
                 Some(path) => match std::fs::metadata(&path) {
-                    Ok(meta) if meta.len() <= MAX_ATTACHMENT_BYTES as u64 => {
-                        match std::fs::read(&path) {
-                            Ok(bytes) if bytes.len() <= MAX_ATTACHMENT_BYTES => FileTask::Upload {
-                                channel,
-                                name: path
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .to_string(),
-                                bytes,
-                            },
-                            Ok(_) => FileTask::Error("O arquivo ultrapassa 100 MiB.".into()),
-                            Err(e) => {
-                                FileTask::Error(format!("Não foi possível ler o arquivo: {e}"))
-                            }
-                        }
-                    }
+                    Ok(meta) if meta.len() <= remaining as u64 => match std::fs::read(&path) {
+                        Ok(bytes) if bytes.len() <= remaining => FileTask::Upload {
+                            channel,
+                            name: path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string(),
+                            bytes,
+                        },
+                        Ok(_) => FileTask::Error("O arquivo ultrapassa 100 MiB.".into()),
+                        Err(e) => FileTask::Error(format!("Não foi possível ler o arquivo: {e}")),
+                    },
                     Ok(_) => FileTask::Error("O arquivo ultrapassa 100 MiB.".into()),
                     Err(e) => FileTask::Error(format!("Não foi possível abrir o arquivo: {e}")),
                 },
@@ -571,5 +732,31 @@ impl LanvoxApp {
             };
             let _ = tx.send(task);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn attachment_namespace_migration_is_idempotent_and_preserves_recovery_source() {
+        let root =
+            std::env::temp_dir().join(format!("lanvox-draft-{:032x}", rand::random::<u128>()));
+        let source = root.join("old");
+        let destination = root.join("new");
+        std::fs::create_dir_all(&source).unwrap();
+        let name = format!("upload-{:032x}.draft", rand::random::<u128>());
+        std::fs::write(source.join(&name), b"draft payload").unwrap();
+        copy_draft_directory(&source, &destination).unwrap();
+        copy_draft_directory(&source, &destination).unwrap();
+        assert_eq!(
+            std::fs::read(destination.join(&name)).unwrap(),
+            b"draft payload"
+        );
+        assert!(source.join(&name).exists());
+        std::fs::write(destination.join(&name), b"different").unwrap();
+        assert!(copy_draft_directory(&source, &destination).is_err());
+        assert_eq!(std::fs::read(source.join(&name)).unwrap(), b"draft payload");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

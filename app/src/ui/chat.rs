@@ -55,7 +55,12 @@ pub fn show(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         )
         .show(ui, |ui| composer(app, ui, &ch));
     egui::CentralPanel::default().frame(Frame::new().fill(theme::color(theme::CHAT))).show(ui, |ui| {
-        let messages = app.view.as_ref().and_then(|v|v.messages.get(&channel)).cloned().unwrap_or_default();
+        let messages = app.view.as_mut().map(|v|v.message_window(channel)).unwrap_or_default();
+        if app.workspace_ui.message_heights.len()>5000 {
+            let ids: std::collections::HashSet<_>=app.view.as_ref().into_iter().flat_map(|v|v.messages.values().flatten().map(|m|m.id)).collect();
+            app.workspace_ui.message_heights.retain(|id,_|ids.contains(id));
+            app.workspace_ui.message_days.retain(|id,_|ids.contains(id));
+        }
         let width = ui.available_width();
         if (app.workspace_ui.message_width-width).abs()>2.0 { app.workspace_ui.message_width=width; app.workspace_ui.message_heights.clear(); }
         let jump=app.scroll_to_bottom>0;
@@ -72,8 +77,8 @@ pub fn show(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             if !jump && !app.demo && viewport.min.y<70.0 && more && !loading {load_older=true;}
             if messages.is_empty() { Frame::new().inner_margin(24).show(ui,|ui| {ui.label(RichText::new("A conversa começa aqui").size(24.0).strong());ui.label("Envie uma mensagem, compartilhe um arquivo ou mencione alguém com @.");}); }
             for (index,m) in messages.iter().enumerate() {
-                let day=message_day(m.time);
-                let new_day=index==0 || message_day(messages[index-1].time)!=day;
+                let day=app.workspace_ui.message_days.entry(m.id).or_insert_with(||message_day(m.time)).clone();
+                let new_day=index==0 || app.workspace_ui.message_days.get(&messages[index-1].id)!=Some(&day);
                 if new_day {ui.add_space(10.0);ui.horizontal(|ui|{ui.separator();ui.label(RichText::new(day).small().color(theme::TEXT_MUTED));ui.separator();});}
                 if first_unread==Some(m.id) {ui.horizontal(|ui|{ui.separator();ui.label(RichText::new("Novas mensagens").small().strong().color(theme::ACCENT));ui.separator();});}
                 let grouped=!new_day && index>0 && messages[index-1].author==m.author && m.time-messages[index-1].time<GROUP_WINDOW_SECS;
@@ -91,7 +96,7 @@ pub fn show(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             let end=ui.allocate_response(vec2(1.0,1.0),egui::Sense::hover());
             if jump {end.scroll_to_me_animation(Some(Align::BOTTOM),egui::style::ScrollAnimation::none());}
         });
-        let has_after=app.workspace_ui.history_has_after.get(&channel).copied().unwrap_or(false);
+        let has_after=app.view.as_ref().is_some_and(|v|v.history_after.contains(&channel));
         let page_bottom=out.state.clamped_offset().y+out.inner_rect.height()>=out.content_size.y-32.0;
         app.chat_at_bottom=!has_after && page_bottom;
         if app.chat_at_bottom {
@@ -109,7 +114,7 @@ pub fn show(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 if has_after && ui.add_enabled(!loading,egui::Button::new("Carregar posteriores")).clicked(){app.load_history_after(channel);}
                 if ui.button(if count>0 {format!("{count} novas · Ir para o presente")}else{"Ir para o presente".into()}).clicked(){app.load_history(channel,false);app.scroll_to_bottom=3;}
-                if count>0 && ui.small_button("Marcar como lidas").clicked(){app.mark_read(channel);}
+                if count>0 && ui.small_button("Marcar como lidas").clicked(){app.mark_all_read(channel);}
             });
         }
         if has_after && page_bottom && !loading && !jump && !app.demo && !has_blocking_surface(app,ui.ctx()){app.load_history_after(channel);}
