@@ -50,5 +50,7 @@ Formato `x.y.z`, só números (o app ignora versões com sufixo, como `0.2.0-bet
 - Se a versão mudar o protocolo (`PROTOCOL_VERSION`), o app avisa que host e clientes precisam atualizar juntos.
 - A atualização usa o instalador por usuário do Inno Setup; os dados e a identidade são preservados.
 - Instalar uma atualização encerra o app (e o host que ele estiver executando).
-- Por padrão o app procura atualizações ao abrir (pode ser desligado nas configurações) e mostra uma faixa no topo com o botão para baixar e instalar. Nada é baixado nem instalado sem um clique.
+- Por padrão o app procura atualizações ao abrir e a cada 5 minutos enquanto está em execução. Baixa e verifica a versão nova automaticamente; quando não houver conexão, reconexão ou host ativo, instala e reabre o app. Isso pode ser desligado nas configurações, mantendo os botões manuais.
+- A publicação não envia um aviso instantâneo ao app: a detecção acontece na próxima consulta. Releases em rascunho ou sem manifesto e assinatura válidos não são instaladas.
+- Versões antigas mantêm o fluxo manual até receberem uma versão com esse comportamento automático.
 - Sem certificado Authenticode o Windows SmartScreen ainda avisará no primeiro uso do instalador; a assinatura do projeto protege a cadeia de atualização, não substitui o certificado.

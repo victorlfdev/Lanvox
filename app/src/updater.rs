@@ -12,8 +12,8 @@
 //! - The installer is downloaded only after that, and run only if its hash and size match
 //!   the signed manifest.
 //!
-//! The app checks at startup and every few hours while open (on by default, can be turned
-//! off) and shows a banner plus one desktop notification; installing needs a click.
+//! The app checks at startup and every five minutes while open (on by default, can be
+//! turned off), downloads signed updates, and installs when no host or connection is active.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -288,6 +288,7 @@ mod client {
         Available(Manifest),
         Downloading(Manifest),
         Ready(Manifest, PathBuf),
+        Installing,
         Failed(String),
     }
 
@@ -368,30 +369,67 @@ mod client {
     }
 
     /// How often a running app looks again, when the person allowed update checks.
-    const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+    const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
     static LAST_CHECK: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     /// Version already announced with a desktop notification, so it is announced once.
     static ANNOUNCED: Mutex<Option<String>> = Mutex::new(None);
 
-    /// Called every frame while the app runs. With `enabled` it re-checks every few hours
-    /// and raises one desktop notification when a new release shows up. It never installs.
-    pub fn poll(ctx: &egui::Context, enabled: bool) {
+    #[derive(Debug, PartialEq, Eq)]
+    enum AutomaticAction {
+        Wait,
+        Download,
+        Install,
+    }
+
+    fn automatic_action(state: &State, enabled: bool, can_restart: bool) -> AutomaticAction {
+        match (enabled, can_restart, state) {
+            (true, _, State::Available(_)) => AutomaticAction::Download,
+            (true, true, State::Ready(..)) => AutomaticAction::Install,
+            _ => AutomaticAction::Wait,
+        }
+    }
+
+    /// Advances automatic updates without interrupting an active host or connection.
+    pub fn poll(ctx: &egui::Context, enabled: bool, can_restart: bool) {
         if !enabled || !configured() {
             return;
         }
-        if let State::Available(manifest) = state() {
+        let current = state();
+        if matches!(current, State::Checking | State::Downloading(_)) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            return;
+        }
+        if let State::Available(manifest) = &current {
             let mut announced = ANNOUNCED.lock();
             if announced.as_deref() != Some(manifest.version.as_str()) {
                 crate::notifications::notify(
                     "Nova versão do Lanvox",
                     &format!(
-                        "A versão {} está disponível. Abra o app para atualizar.",
+                        "A versão {} será baixada e instalada automaticamente quando não houver sessão ativa.",
                         manifest.version
                     ),
                 );
-                *announced = Some(manifest.version);
+                *announced = Some(manifest.version.clone());
             }
+        }
+        match automatic_action(&current, enabled, can_restart) {
+            AutomaticAction::Download => {
+                download();
+                ctx.request_repaint();
+                return;
+            }
+            AutomaticAction::Install => {
+                match launch_installer() {
+                    Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                    Err(error) => set(State::Failed(error)),
+                }
+                ctx.request_repaint();
+                return;
+            }
+            AutomaticAction::Wait => {}
+        }
+        if matches!(current, State::Ready(..) | State::Installing) {
             return;
         }
         let elapsed = LAST_CHECK.lock().map(|at| at.elapsed());
@@ -412,7 +450,10 @@ mod client {
     pub fn check() {
         {
             let mut state = STATE.lock();
-            if matches!(*state, State::Checking | State::Downloading(_)) {
+            if matches!(
+                *state,
+                State::Checking | State::Downloading(_) | State::Installing
+            ) {
                 return;
             }
             *state = State::Checking;
@@ -498,15 +539,68 @@ mod client {
         verify_installer(&manifest, &path)?;
         #[cfg(windows)]
         {
+            let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+            let install_dir = executable.parent().ok_or("pasta do app indisponível")?;
             std::process::Command::new(&path)
-                .args(["/SILENT", "/CLOSEAPPLICATIONS", "/NORESTARTAPPLICATIONS"])
+                .args([
+                    "/SP-",
+                    "/VERYSILENT",
+                    "/SUPPRESSMSGBOXES",
+                    "/NORESTART",
+                    "/CLOSEAPPLICATIONS",
+                    "/NORESTARTAPPLICATIONS",
+                    "/LANVOXUPDATE=1",
+                ])
+                .arg(format!("/DIR={}", install_dir.display()))
                 .spawn()
-                .map(|_| ())
+                .map(|_| set(State::Installing))
                 .map_err(|e| format!("não foi possível abrir o instalador ({e})"))
         }
         #[cfg(not(windows))]
         {
             Err("atualização automática disponível apenas no Windows".into())
+        }
+    }
+
+    #[cfg(test)]
+    mod automatic_tests {
+        use super::*;
+
+        #[test]
+        fn automatic_update_waits_for_sessions_and_respects_opt_out() {
+            let manifest = Manifest {
+                product: PRODUCT.into(),
+                version: "9.9.9".into(),
+                protocol: 1,
+                url: String::new(),
+                sha256: String::new(),
+                size: 1,
+                notes: String::new(),
+            };
+            let available = State::Available(manifest.clone());
+            let ready = State::Ready(manifest.clone(), PathBuf::from("setup.exe"));
+            assert_eq!(
+                automatic_action(&available, true, false),
+                AutomaticAction::Download
+            );
+            assert_eq!(automatic_action(&ready, true, false), AutomaticAction::Wait);
+            assert_eq!(
+                automatic_action(&ready, true, true),
+                AutomaticAction::Install
+            );
+            for state in [&available, &ready] {
+                assert_eq!(automatic_action(state, false, true), AutomaticAction::Wait);
+            }
+            for state in [
+                State::Checking,
+                State::Downloading(manifest),
+                State::Installing,
+                State::Failed("offline".into()),
+                State::UpToDate,
+                State::Idle,
+            ] {
+                assert_eq!(automatic_action(&state, true, true), AutomaticAction::Wait);
+            }
         }
     }
 }

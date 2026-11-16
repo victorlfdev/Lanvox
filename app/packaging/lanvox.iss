@@ -60,6 +60,7 @@ Root: HKCU; Subkey: "Software\Classes\lanvox\shell\open\command"; ValueType: str
 
 [Run]
 Filename: "{app}\lanvox.exe"; Description: "Abrir Lanvox"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\lanvox.exe"; Flags: nowait skipifnotsilent; Check: IsLanvoxUpdate
 
 ; Runtime data and identities intentionally live outside {app}; uninstall preserves them.
 
@@ -69,3 +70,9 @@ Root: HKCU; Subkey: "Software\Classes\huddle"; ValueType: string; ValueName: "";
 Root: HKCU; Subkey: "Software\Classes\huddle"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\huddle\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\lanvox.exe,0"
 Root: HKCU; Subkey: "Software\Classes\huddle\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\lanvox.exe"" ""%1"""
+
+[Code]
+function IsLanvoxUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:LANVOXUPDATE|0}') = '1';
+end;

@@ -340,8 +340,7 @@ pub(super) fn account_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
     update_section(app, ui);
 }
 
-/// Signed updates from GitHub Releases. Nothing is contacted until the person asks or
-/// turns on the startup check.
+/// Signed updates from GitHub Releases, with an opt-out for automatic updates.
 fn update_section(app: &mut LanvoxApp, ui: &mut egui::Ui) {
     use crate::updater::{self, State};
     let muted = |text: &str| RichText::new(text.to_string()).color(theme::color(theme::TEXT_MUTED));
@@ -360,7 +359,7 @@ fn update_section(app: &mut LanvoxApp, ui: &mut egui::Ui) {
     if ui
         .checkbox(
             &mut app.settings.check_updates_on_start,
-            "Procurar atualizações ao abrir e a cada 6 horas, avisando quando houver release (contata o GitHub, que vê o seu endereço IP)",
+            "Atualizar automaticamente ao abrir e verificar a cada 5 minutos (contata o GitHub)",
         )
         .changed()
     {
@@ -371,6 +370,9 @@ fn update_section(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         State::Idle => {}
         State::Checking => {
             ui.label(muted("Procurando…"));
+        }
+        State::Installing => {
+            ui.label(muted("Instalando atualização…"));
         }
         State::UpToDate => {
             ui.label(muted("Você está na versão mais recente."));
@@ -416,12 +418,15 @@ fn update_section(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                 }
             }
         }
-        State::Checking | State::Downloading(_) => {}
+        State::Checking | State::Downloading(_) | State::Installing => {}
     });
     if matches!(state, State::Checking | State::Downloading(_)) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(250));
     }
+    ui.label(muted(
+        "Com a atualização automática ativada, o app baixa a versão nova, instala e reabre quando não houver conexão ou host ativo. O GitHub vê seu endereço IP.",
+    ));
     ui.label(muted(
         "Cada atualização é assinada com a chave do projeto; arquivos sem assinatura válida, de versão antiga ou que não batem com o hash assinado são recusados.",
     ));

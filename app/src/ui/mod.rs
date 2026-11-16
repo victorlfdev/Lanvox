@@ -28,7 +28,7 @@ use crate::model::ChannelKind;
 static DISMISSED_UPDATE: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
 
 /// A strip above everything when a signed update is available, downloading or ready.
-/// "Depois" hides it for this run only; nothing is installed without a click.
+/// Manual controls remain available when automatic updates are disabled or deferred.
 fn update_banner(app: &mut LanvoxApp, ui: &mut egui::Ui) {
     use crate::updater::{self, State};
     let ctx = ui.ctx().clone();
@@ -67,7 +67,7 @@ fn update_banner(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                         if ui.button("Baixar atualização").clicked() {
                             updater::download();
                         }
-                        if ui.button("Depois").clicked() {
+                        if !app.settings.check_updates_on_start && ui.button("Depois").clicked() {
                             *DISMISSED_UPDATE.lock() = Some(manifest.version.clone());
                         }
                     }
@@ -76,6 +76,9 @@ fn update_banner(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                         ui.label("Baixando e verificando…");
                     }
                     State::Ready(..) => {
+                        if app.settings.check_updates_on_start {
+                            ui.label("Instalação automática aguardando o encerramento da conexão ou host.");
+                        }
                         let label = if app.hosted.is_some() {
                             "Reiniciar e instalar (encerra o seu host)"
                         } else {

@@ -37,7 +37,7 @@ Só a versão mais recente recebe correções de segurança. O protocolo exige h
 
 ## Privacidade e atualizações
 
-O Lanvox não envia telemetria. Ao abrir, o app consulta o GitHub por dois pequenos arquivos de uma atualização assinada (o GitHub vê o seu endereço IP); isso pode ser desligado em Configurações › Minha conta › Atualizações. Nada é baixado nem instalado sem um clique. As demais conexões a terceiros acontecem só quando você ativa ou pede: o codec OpenH264 baixado da Cisco (verificado por SHA-256) e miniaturas de links de vídeo (Configurações › Vídeo).
+O Lanvox não envia telemetria. Ao abrir e a cada 5 minutos enquanto está em execução, o app consulta o GitHub por dois pequenos arquivos de uma atualização assinada (o GitHub vê o seu endereço IP); isso pode ser desligado em Configurações › Minha conta › Atualizações. Por padrão, versões novas são baixadas e verificadas automaticamente; a instalação e a reabertura aguardam o encerramento de conexões, reconexões e hosts ativos. Com a opção desligada, a atualização depende dos botões manuais. As demais conexões a terceiros acontecem só quando você ativa ou pede: o codec OpenH264 baixado da Cisco (verificado por SHA-256) e miniaturas de links de vídeo (Configurações › Vídeo).
 
 ## Atualizações assinadas
 

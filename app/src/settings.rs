@@ -286,7 +286,7 @@ pub struct Settings {
     /// Fetch thumbnails for video links from the linked site (YouTube or any direct URL).
     /// Off by default: the request reveals this device's IP address to that site.
     pub remote_link_previews: bool,
-    /// Look for a signed update at startup. On by default; the request reveals this
+    /// Check, download and install signed updates automatically. On by default; the request reveals this
     /// device's IP address to GitHub and can be turned off in Settings.
     pub check_updates_on_start: bool,
     pub ui_scale: f32,

@@ -51,6 +51,7 @@ Desktop.ini
 # Private comparative analyses and research notes (kept locally, not published)
 /ANALISE_*.md
 /REANALISE_*.md
+/analise/
 /app/MECHANICS.md
 /app/mechanics.json
 /build-pkg.log
