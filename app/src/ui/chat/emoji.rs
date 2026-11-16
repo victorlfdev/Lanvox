@@ -107,7 +107,7 @@ pub(super) fn emoji_picker(
         app.settings.emoji_recents.retain(|e| e != emoji);
         app.settings.emoji_recents.insert(0, emoji.clone());
         app.settings.emoji_recents.truncate(24);
-        app.settings.save();
+        app.save_preferences();
         app.workspace_ui.emoji_query.clear();
     }
     picked

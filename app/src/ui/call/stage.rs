@@ -78,12 +78,12 @@ pub fn stream_stage(app: &mut LanvoxApp, ui: &mut egui::Ui, key: StreamKey, full
         .and_then(|v| v.stream(key.0, key.1))
         .map(|s| s.label.clone())
         .unwrap_or_default();
-    let live = Rect::from_min_size(bar.left_top() + vec2(12.0, 13.0), vec2(36.0, 18.0));
+    let live = Rect::from_min_size(bar.left_top() + vec2(12.0, 13.0), vec2(58.0, 18.0));
     painter.rect_filled(live, 4.0, theme::RED);
     painter.text(
         live.center(),
         Align2::CENTER_CENTER,
-        "LIVE",
+        "AO VIVO",
         FontId::proportional(11.0),
         Color32::WHITE,
     );
@@ -92,13 +92,24 @@ pub fn stream_stage(app: &mut LanvoxApp, ui: &mut egui::Ui, key: StreamKey, full
     } else {
         format!("{name} — {label}")
     };
-    painter.text(
+    let title_clip = Rect::from_min_max(
+        pos2(live.right() + 10.0, bar.top()),
+        pos2((bar.right() - 120.0).max(live.right() + 10.0), bar.bottom()),
+    );
+    let title_painter = painter.with_clip_rect(title_clip);
+    title_painter.text(
         pos2(live.right() + 10.0, bar.center().y - 7.0),
         Align2::LEFT_CENTER,
-        title,
+        &title,
         FontId::proportional(14.0),
         Color32::WHITE,
     );
+    ui.interact(
+        title_clip,
+        egui::Id::unique(("stream-title", key)),
+        Sense::hover(),
+    )
+    .on_hover_text(title);
     let stats = if own {
         let (s, preset, source) = app
             .share
@@ -390,7 +401,7 @@ pub(super) fn controls(app: &mut LanvoxApp, ui: &mut egui::Ui, chat_channel: Opt
                 Icon::Hash,
                 size,
                 if open {
-                    theme::ACCENT
+                    theme::ACTION_FILL
                 } else {
                     theme::color(theme::INPUT)
                 },

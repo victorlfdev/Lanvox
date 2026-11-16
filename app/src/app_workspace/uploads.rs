@@ -144,6 +144,44 @@ pub(super) fn prune_migrated_drafts(receipt: &crate::settings::IdentityMigration
 }
 
 impl LanvoxApp {
+    /// Commit the attachment before removing its voice preview, so disk failures cannot lose it.
+    pub fn stage_voice_attachment(
+        &mut self,
+        channel: ChannelId,
+        name: String,
+        bytes: Vec<u8>,
+    ) -> Result<(), String> {
+        if bytes.is_empty()
+            || bytes.len() > MAX_ATTACHMENT_BYTES
+            || !self.workspace_ui.can_stage(channel, bytes.len())
+        {
+            return Err(
+                "Não há espaço para anexar a gravação. Envie ou remova outros arquivos primeiro."
+                    .into(),
+            );
+        }
+        let mut digest = [0; 32];
+        digest.copy_from_slice(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref());
+        let file = StagedAttachment {
+            operation: format!("upload-{:032x}", rand::random::<u128>()),
+            name,
+            bytes,
+            preview: None,
+            digest,
+        };
+        if !self.demo {
+            write_draft(&self.local_identity, &self.current_host(), channel, &file).map_err(
+                |e| format!("Não foi possível anexar a gravação; a prévia foi preservada: {e}"),
+            )?;
+        }
+        self.workspace_ui
+            .staged
+            .entry(channel)
+            .or_default()
+            .push(file);
+        Ok(())
+    }
+
     pub fn stage_attachment(&mut self, channel: ChannelId, name: String, bytes: Vec<u8>) {
         if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
             self.notify("O arquivo está vazio ou ultrapassa o limite de 100 MiB.");

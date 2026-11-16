@@ -12,6 +12,33 @@ pub(super) fn voice_members(app: &mut LanvoxApp, ui: &mut egui::Ui, channel: Cha
         let speaking = view.speaking.contains(&id)
             || (id == view.me && app.audio_shared.speaking.load(Ordering::Relaxed));
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::Role::Button,
+                ui.is_enabled(),
+                format!(
+                    "{name}{}{}",
+                    if state.muted {
+                        ", microfone silenciado"
+                    } else {
+                        ""
+                    },
+                    if state.streaming {
+                        ", transmitindo. Ativar para assistir"
+                    } else {
+                        ", participante da chamada"
+                    }
+                ),
+            )
+        });
+        if resp.has_focus() {
+            ui.painter().rect_stroke(
+                rect.shrink(1.0),
+                4,
+                Stroke::new(2.0, theme::TEXT_BRIGHT),
+                egui::StrokeKind::Inside,
+            );
+        }
         if resp.hovered() {
             ui.painter().rect_filled(
                 rect.shrink2(vec2(0.0, 1.0)).translate(vec2(28.0, 0.0)),
@@ -36,13 +63,13 @@ pub(super) fn voice_members(app: &mut LanvoxApp, ui: &mut egui::Ui, channel: Cha
         let mut x = rect.right() - 6.0;
         let mut badge = |icon: Option<Icon>, live: bool| {
             if live {
-                let w = 34.0;
+                let w = 52.0;
                 let r = Rect::from_min_size(pos2(x - w, rect.center().y - 8.0), vec2(w, 16.0));
                 ui.painter().rect_filled(r, 4.0, theme::color(theme::RED));
                 ui.painter().text(
                     r.center(),
                     Align2::CENTER_CENTER,
-                    "LIVE",
+                    "AO VIVO",
                     FontId::proportional(10.5),
                     Color32::WHITE,
                 );
@@ -80,7 +107,7 @@ pub(super) fn voice_members(app: &mut LanvoxApp, ui: &mut egui::Ui, channel: Cha
     }
     if let Some(key) = open_stream {
         if app.view.as_ref().and_then(|v| v.my_voice().channel) == Some(channel) {
-            app.selected = Some(channel);
+            app.select_channel(channel);
             app.watch(key);
         } else {
             app.notify("Entre neste canal de voz para assistir.");
@@ -143,7 +170,7 @@ pub(super) fn voice_panel(
                 )
                 .clicked()
             {
-                app.selected = Some(channel);
+                app.select_channel(channel);
             }
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -205,13 +232,21 @@ pub(super) fn wide_button(
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
     let bg = if active {
-        theme::color(theme::GREEN)
+        theme::color(theme::ACTION_FILL)
     } else if resp.hovered() {
         theme::color(theme::SELECTED)
     } else {
         theme::color(theme::INPUT)
     };
     ui.painter().rect_filled(rect, 6.0, bg);
+    if resp.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(1.0),
+            6,
+            Stroke::new(2.0, theme::TEXT_BRIGHT),
+            egui::StrokeKind::Outside,
+        );
+    }
     let ir = Rect::from_center_size(rect.center(), vec2(20.0, 20.0));
     icons::paint(ui.painter(), ir, icon, Color32::WHITE);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), tip));
@@ -229,7 +264,7 @@ pub(super) fn user_panel(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         let texture = app.avatar_texture(ui.ctx(), me);
         // We are connected by definition; only our chosen presence matters.
         let my_state = PresenceState::resolve(
-            true,
+            app.demo || app.client.as_ref().is_some_and(|c| c.is_alive()),
             app.view
                 .as_ref()
                 .and_then(|v| v.workspace.profiles.iter().find(|p| p.user == me))

@@ -134,6 +134,41 @@ pub fn root(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             });
     }
     update_banner(app, ui);
+    if let Some(error) = app.workspace_ui.operation_errors.front().cloned() {
+        Panel::top("operation-error")
+            .frame(
+                Frame::new()
+                    .fill(theme::color(theme::PANEL))
+                    .inner_margin(10),
+            )
+            .show(ui, |ui| {
+                let host = app
+                    .view
+                    .as_ref()
+                    .map(|v| v.name.as_str())
+                    .unwrap_or("Este dispositivo");
+                ui.label(
+                    egui::RichText::new(format!("{host} · Não foi possível concluir a operação"))
+                        .strong()
+                        .color(theme::YELLOW),
+                );
+                ui.label(&error);
+                ui.horizontal(|ui| {
+                    if ui.button("Copiar detalhes").clicked() {
+                        ui.ctx().copy_text(error.clone());
+                    }
+                    if ui.button("Dispensar aviso").clicked() {
+                        app.workspace_ui.operation_errors.pop_front();
+                    }
+                    if app.workspace_ui.operation_errors.len() > 1 {
+                        ui.label(format!(
+                            "{} avisos",
+                            app.workspace_ui.operation_errors.len()
+                        ));
+                    }
+                });
+            });
+    }
     if app.fullscreen {
         if let Some(key) = app.focused {
             egui::CentralPanel::default()
@@ -167,7 +202,7 @@ pub fn root(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             .show(ui, |ui| sidebar::channels(app, ui));
         app.settings.channel_width = channels_panel.response.rect.width();
         if ui.input(|i| i.pointer.any_released()) {
-            app.settings.save();
+            app.save_preferences();
         }
 
         // A call that belongs to a conversation is shown inside that conversation.
@@ -175,7 +210,7 @@ pub fn root(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             .selected
             .and_then(|id| app.view.as_ref()?.conversation_of_call(id))
         {
-            app.selected = Some(conv);
+            app.select_channel(conv);
         }
         let selected_kind = app.selected.and_then(|id| {
             app.view
@@ -206,6 +241,9 @@ pub fn root(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                     call::embedded(app, ui, call_id);
                 }
                 let details_visible = details::show(app, ui);
+                let members_overlay = !details_visible
+                    && app.workspace_ui.members_overlay_open
+                    && ui.available_width() <= 650.0;
                 if !details_visible && app.show_members && ui.available_width() > 650.0 {
                     let members_panel = Panel::right("members")
                         .default_size(app.settings.member_width.clamp(190.0, 320.0))
@@ -223,6 +261,18 @@ pub fn root(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                             chat::show(app, ui);
                         }
                     });
+                if members_overlay {
+                    let result = components::modal(
+                        &ctx,
+                        "participants",
+                        "Participantes",
+                        components::ModalOptions::new(340.0).secondary("Fechar"),
+                        |ui| members::show(app, ui),
+                    );
+                    if result.cancelled() {
+                        app.workspace_ui.members_overlay_open = false;
+                    }
+                }
             }
         }
     }

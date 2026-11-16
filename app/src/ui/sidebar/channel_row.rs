@@ -232,10 +232,13 @@ pub(super) fn channel_row(
             }
         }
         if manage && ui.button("Editar canal").clicked() {
-            app.selected = Some(ch.id);
-            app.workspace_ui.managing = true;
-            app.workspace_ui.extras.admin_guild = Some(ch.guild);
-            app.workspace_ui.extras.admin_tab = 1;
+            app.open_guild_settings(Some(ch.guild), 1);
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    egui::Id::unique(("admin-channel-selection", ch.guild)),
+                    ch.id,
+                )
+            });
             ui.close();
         }
     });
@@ -244,9 +247,6 @@ pub(super) fn channel_row(
     }
     if resp.clicked() {
         app.select_channel(ch.id);
-        if kind == ChannelKind::Voice {
-            app.join_voice(ch.id);
-        }
     }
     if kind == ChannelKind::Voice {
         voice_members(app, ui, ch.id);

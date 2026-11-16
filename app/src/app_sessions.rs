@@ -72,6 +72,7 @@ impl LanvoxApp {
             return;
         }
         let address = self.current_host();
+        self.preserve_voice_note();
         self.save_drafts();
         self.leave_voice();
         let Some(mut view) = self.view.take() else {
@@ -152,7 +153,7 @@ impl LanvoxApp {
         self.connecting = false;
         self.reconnect_at = None;
         self.connection_status.clear();
-        self.settings.save();
+        self.save_preferences();
         for event in target.deferred {
             self.on_workspace_event(event);
         }
@@ -364,6 +365,9 @@ impl LanvoxApp {
                                 && message.author != host.view.me
                                 && self.settings.notifications
                                 && !self.settings.do_not_disturb
+                                && !host.view.workspace.profiles.iter().any(|p| {
+                                    p.user == host.view.me && p.presence == Presence::DoNotDisturb
+                                })
                                 && guild_preference.muted_until <= now_secs()
                                 && preference.allows(mentioned, now_secs())
                             {

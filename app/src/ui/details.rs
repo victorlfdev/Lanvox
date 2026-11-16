@@ -9,35 +9,105 @@ pub fn show(app: &mut LanvoxApp, ui: &mut Ui) -> bool {
     if !searching && !inbox && !app.workspace_ui.pinned_only {
         return false;
     }
+    if ui.available_width() < 850.0 {
+        let ctx = ui.ctx().clone();
+        let result = components::modal(
+            &ctx,
+            "conversation-details-overlay",
+            if searching {
+                "Buscar mensagens"
+            } else if inbox {
+                "Caixa de entrada"
+            } else {
+                "Mensagens fixadas"
+            },
+            components::ModalOptions::new(540.0).secondary("Voltar à conversa"),
+            |ui| content(app, ui, searching, inbox),
+        );
+        if result.cancelled() {
+            close(app);
+        }
+        return true;
+    }
     let width = (ui.available_width() * 0.43).clamp(280.0, 410.0);
     egui::Panel::right("conversation-details")
-        .default_size(width).min_size(260.0).max_size(480.0).resizable(true)
-        .frame(egui::Frame::new().fill(theme::color(theme::SIDEBAR)).inner_margin(14))
+        .default_size(width)
+        .min_size(260.0)
+        .max_size(480.0)
+        .resizable(true)
+        .frame(
+            egui::Frame::new()
+                .fill(theme::color(theme::SIDEBAR))
+                .inner_margin(14),
+        )
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(if searching { "Buscar mensagens" } else if inbox { "Caixa de entrada" } else { "Mensagens fixadas" }).strong().size(18.0));
+                ui.label(
+                    RichText::new(if searching {
+                        "Buscar mensagens"
+                    } else if inbox {
+                        "Caixa de entrada"
+                    } else {
+                        "Mensagens fixadas"
+                    })
+                    .strong()
+                    .size(18.0),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if widgets::icon_button(ui, Icon::Close, 26.0, theme::color(theme::TEXT_MUTED), "Fechar painel").clicked() {
-                        app.workspace_ui.search_open = false;
-                        app.workspace_ui.inbox_open = false;
-                        app.workspace_ui.inbox_requested = None;
-                        app.workspace_ui.pinned_only = false;
+                    if widgets::icon_button(
+                        ui,
+                        Icon::Close,
+                        26.0,
+                        theme::color(theme::TEXT_MUTED),
+                        "Fechar painel",
+                    )
+                    .clicked()
+                    {
+                        close(app);
                     }
                 });
             });
             ui.separator();
-            if searching { search(app, ui); }
-            else if inbox { inbox_content(app, ui); }
-            else {
-                let messages = app.selected.and_then(|c| app.workspace_ui.pinned_messages.get(&c)).cloned().unwrap_or_default();
-                if messages.is_empty() { ui.label("Ainda não há mensagens fixadas. Abra as ações de uma mensagem para fixá-la."); }
-                result_rows(app, ui, &messages, "pinned-list");
-            }
+            egui::ScrollArea::vertical()
+                .id_salt("details-content")
+                .show(ui, |ui| content(app, ui, searching, inbox));
         });
     true
 }
 
+fn close(app: &mut LanvoxApp) {
+    app.workspace_ui.search_open = false;
+    app.workspace_ui.inbox_open = false;
+    app.workspace_ui.inbox_requested = None;
+    app.workspace_ui.pinned_only = false;
+}
+
+fn content(app: &mut LanvoxApp, ui: &mut Ui, searching: bool, inbox: bool) {
+    if searching {
+        search(app, ui);
+    } else if inbox {
+        inbox_content(app, ui);
+    } else {
+        let messages = app
+            .selected
+            .and_then(|c| app.workspace_ui.pinned_messages.get(&c))
+            .cloned()
+            .unwrap_or_default();
+        if messages.is_empty() {
+            ui.label("Ainda não há mensagens fixadas. Abra as ações de uma mensagem para fixá-la.");
+        }
+        result_rows(app, ui, &messages, "pinned-list");
+    }
+}
+
 fn search(app: &mut LanvoxApp, ui: &mut Ui) {
+    let scope = format!(
+        "{}|{}",
+        app.local_identity,
+        crate::settings::host_address(&app.current_host())
+    );
+    let after_key = format!("{scope}|search-after");
+    let before_key = format!("{scope}|search-before");
     let signature = format!("{:?}", app.workspace_ui.search_request);
     if app.workspace_ui.extras.search_signature != signature {
         app.workspace_ui.extras.search_draft = Some(app.workspace_ui.search_request.clone());
@@ -55,7 +125,7 @@ fn search(app: &mut LanvoxApp, ui: &mut Ui) {
             .desired_width(f32::INFINITY),
     );
     let mut submit = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-    ui.collapsing("Filtros", |ui| {
+    ui.collapsing("Filtros e ordenação", |ui| {
         let channels: Vec<_> = app
             .view
             .as_ref()
@@ -94,8 +164,8 @@ fn search(app: &mut LanvoxApp, ui: &mut Ui) {
             &mut request.mentions,
             &users,
         );
-        date_filter(ui, "A partir de", &mut request.after, "search-after", false);
-        date_filter(ui, "Até", &mut request.before, "search-before", true);
+        date_filter(ui, "A partir de", &mut request.after, &after_key, false);
+        date_filter(ui, "Até", &mut request.before, &before_key, true);
         egui::ComboBox::from_id_salt("search-attachment")
             .selected_text(match request.has_attachment {
                 Some(true) => "Com anexos",
@@ -107,20 +177,44 @@ fn search(app: &mut LanvoxApp, ui: &mut Ui) {
                 ui.selectable_value(&mut request.has_attachment, Some(true), "Com anexos");
                 ui.selectable_value(&mut request.has_attachment, Some(false), "Sem anexos");
             });
+        egui::ComboBox::from_id_salt("search-order")
+            .selected_text(match request.order {
+                SearchOrder::Newest => "Mais recentes",
+                SearchOrder::Oldest => "Mais antigas",
+                SearchOrder::Relevance => "Relevância",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut request.order, SearchOrder::Newest, "Mais recentes");
+                ui.selectable_value(&mut request.order, SearchOrder::Oldest, "Mais antigas");
+                ui.selectable_value(&mut request.order, SearchOrder::Relevance, "Relevância");
+            });
     });
-    egui::ComboBox::from_id_salt("search-order")
-        .selected_text(match request.order {
-            SearchOrder::Newest => "Mais recentes",
-            SearchOrder::Oldest => "Mais antigas",
-            SearchOrder::Relevance => "Relevância",
+    let valid_date = |salt: &str, value: Option<i64>| {
+        ui.ctx().data(|d| {
+            d.get_temp::<(Option<i64>, String)>(egui::Id::unique(salt))
+                .filter(|(saved, _)| *saved == value)
+                .is_none_or(|(_, text)| text.trim().is_empty() || value.is_some())
         })
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut request.order, SearchOrder::Newest, "Mais recentes");
-            ui.selectable_value(&mut request.order, SearchOrder::Oldest, "Mais antigas");
-            ui.selectable_value(&mut request.order, SearchOrder::Relevance, "Relevância");
-        });
-    submit |= components::primary_button(ui, "Buscar").clicked();
-    if submit {
+    };
+    let dates_valid = valid_date(&after_key, request.after)
+        && valid_date(&before_key, request.before)
+        && request
+            .after
+            .zip(request.before)
+            .is_none_or(|(after, before)| after <= before);
+    if !dates_valid {
+        ui.colored_label(
+            theme::YELLOW,
+            "Corrija as datas dos filtros. O início deve ser anterior ao fim.",
+        );
+    }
+    submit |= ui
+        .add_enabled_ui(dates_valid && !app.workspace_ui.search_loading, |ui| {
+            components::primary_button(ui, "Buscar")
+        })
+        .inner
+        .clicked();
+    if submit && dates_valid && !app.workspace_ui.search_loading {
         request.offset = 0;
         app.begin_search(request.clone());
     }

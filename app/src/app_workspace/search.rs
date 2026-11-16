@@ -51,8 +51,7 @@ impl LanvoxApp {
             return;
         }
         let mut request = self.workspace_ui.search_submitted.clone();
-        request.offset =
-            self.workspace_ui.search_offset + self.workspace_ui.search_results.len() as u32;
+        request.offset = self.workspace_ui.search_offset;
         self.workspace_ui.search_loading = true;
         self.workspace_query(WorkspaceCommand::SearchAdvanced(request));
     }
@@ -68,11 +67,22 @@ impl LanvoxApp {
         if query != self.workspace_ui.search_submitted.query {
             return;
         }
-        self.workspace_ui.search_results = messages;
+        self.workspace_ui.search_offset = offset.saturating_add(messages.len() as u32);
+        if offset == 0 {
+            self.workspace_ui.search_results.clear();
+        }
+        let mut seen: HashSet<_> = self
+            .workspace_ui
+            .search_results
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        self.workspace_ui
+            .search_results
+            .extend(messages.into_iter().filter(|m| seen.insert(m.id)));
         self.workspace_ui.search_query = query;
         self.workspace_ui.search_open = true;
         self.workspace_ui.search_loading = false;
-        self.workspace_ui.search_offset = offset;
         self.workspace_ui.search_has_more = has_more;
         if let Some(view) = &mut self.view {
             for detail in details {

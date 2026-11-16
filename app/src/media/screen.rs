@@ -75,7 +75,7 @@ impl Resolution {
             Resolution::P720 => "720p",
             Resolution::P1080 => "1080p",
             Resolution::P1440 => "1440p",
-            Resolution::Source => "Source",
+            Resolution::Source => "Original",
         }
     }
 

@@ -89,7 +89,7 @@ impl LanvoxApp {
             self.focused = Some((me, StreamKind::Screen));
         }
         self.modal = Modal::None;
-        self.settings.save();
+        self.save_preferences();
     }
 
     pub fn stop_share(&mut self) {

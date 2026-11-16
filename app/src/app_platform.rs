@@ -26,7 +26,7 @@ impl LanvoxApp {
         if blocked {
             users.push(user);
         }
-        self.settings.save();
+        self.save_preferences();
         let name = self
             .view
             .as_ref()
@@ -98,20 +98,20 @@ impl LanvoxApp {
             format!("{}|{channel}", self.notification_scope()),
             preference,
         );
-        self.settings.save();
+        self.save_preferences();
     }
 
     pub fn set_guild_notifications(&mut self, guild: GuildId, preference: NotificationPreference) {
         self.settings
             .guild_notifications
             .insert(format!("{}|{guild}", self.notification_scope()), preference);
-        self.settings.save();
+        self.save_preferences();
     }
 
     pub fn should_notify_message(&self, message: &Message) -> bool {
         if message.author == self.me()
             || self.is_blocked(message.author)
-            || self.settings.do_not_disturb
+            || self.notifications_paused()
         {
             return false;
         }

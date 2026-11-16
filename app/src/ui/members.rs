@@ -111,7 +111,7 @@ pub fn show(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             let role_color = roles
                 .iter()
                 .max_by_key(|r| r.position)
-                .map(|r| color32(r.color));
+                .map(|r| theme::readable_text(color32(r.color), theme::color(theme::SIDEBAR)));
             let state = PresenceState::of_user(app, person.id);
             let online = state.is_present();
             ui.horizontal(|ui| {
@@ -233,9 +233,13 @@ fn contact_profile(app: &mut LanvoxApp, ui: &mut egui::Ui, user: UserId) {
             })
             .unwrap_or(0);
         ui.label(
-            RichText::new(format!("{mutual} comunidade(s) em comum"))
-                .small()
-                .color(theme::color(theme::TEXT_MUTED)),
+            RichText::new(match mutual {
+                0 => "Nenhuma comunidade em comum".to_owned(),
+                1 => "1 comunidade em comum".to_owned(),
+                _ => format!("{mutual} comunidades em comum"),
+            })
+            .small()
+            .color(theme::color(theme::TEXT_MUTED)),
         );
         ui.add_space(16.0);
         if ui.button("Ver perfil").clicked() {

@@ -29,7 +29,7 @@ pub fn avatar_at(
         Align2::CENTER_CENTER,
         letter,
         FontId::proportional(radius * 0.95),
-        Color32::WHITE,
+        theme::on_color(color),
     );
     if speaking {
         p.circle_stroke(c, radius + 1.5, Stroke::new(2.5, theme::GREEN));
@@ -45,26 +45,6 @@ pub fn avatar_at(
             p.circle_filled(dot, dr * 0.45, theme::color(theme::SIDEBAR));
         }
     }
-}
-
-pub fn avatar(
-    ui: &mut Ui,
-    size: f32,
-    name: &str,
-    color: Color32,
-    speaking: bool,
-    status: Option<bool>,
-) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
-    avatar_at(ui, rect, name, color, speaking, status);
-    resp.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::Role::Button,
-            ui.is_enabled(),
-            format!("Perfil de {name}"),
-        )
-    });
-    resp
 }
 
 /// A square icon button with hover background and tooltip.
@@ -138,7 +118,7 @@ pub fn section_label(ui: &mut Ui, text: &str) -> Response {
 pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
     ui.add(
         egui::Button::new(egui::RichText::new(text).color(Color32::WHITE).strong())
-            .fill(theme::ACCENT)
+            .fill(theme::ACTION_FILL)
             .corner_radius(4)
             .min_size(vec2(96.0, 34.0)),
     )

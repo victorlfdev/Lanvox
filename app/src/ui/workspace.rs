@@ -1,15 +1,20 @@
 //! Accessible forms for profiles, private groups and community administration.
 use super::{components, theme};
 use crate::{app::LanvoxApp, model::*};
-use egui::vec2;
 type EmojiImageTask =
     crossbeam_channel::Receiver<Result<Option<(GuildId, String, Vec<u8>)>, String>>;
 type CommunityImageTask =
     crossbeam_channel::Receiver<Result<Option<(GuildId, bool, image::DynamicImage)>, String>>;
 type ConversationImageTask =
     crossbeam_channel::Receiver<Result<Option<(ChannelId, Vec<u8>)>, String>>;
+#[derive(Clone, Default)]
+pub struct ForumDraft {
+    pub title: String,
+    pub body: String,
+}
 #[derive(Default)]
 pub struct UiExtras {
+    pub forum_drafts: std::collections::HashMap<ChannelId, ForumDraft>,
     pub search_draft: Option<SearchRequest>,
     pub search_signature: String,
     pub emoji_name: String,
@@ -17,6 +22,7 @@ pub struct UiExtras {
     pub event: ScheduledEvent,
     pub event_date: String,
     pub event_end: String,
+    pub event_edit_open: bool,
     pub invites: Vec<InviteInfo>,
     pub bans: Vec<BanInfo>,
     pub timeouts: Vec<MemberTimeout>,
@@ -32,7 +38,6 @@ pub struct UiExtras {
     pub invite_uses: u16,
     pub role: CommunityRole,
     pub moderation_reason: String,
-    pub thread_name: String,
     pub thread_tags: String,
     pub thread_tags_channel: Option<ChannelId>,
     pub forum_filter: String,
@@ -123,22 +128,35 @@ fn profile(app: &mut LanvoxApp, ctx: &egui::Context) {
             } else {
                 "Enviar mensagem"
             })
-            .secondary("Fechar"),
+            .secondary(if own { "Cancelar" } else { "Fechar" }),
         |ui| {
-            let texture = app.avatar_texture(ctx, user);
+            let texture = if own {
+                super::community_ui::image_texture(
+                    ctx,
+                    &format!("profile-draft-{user}"),
+                    &app.workspace_ui.profile_avatar,
+                )
+            } else {
+                app.avatar_texture(ctx, user)
+            };
+            let color = app
+                .view
+                .as_ref()
+                .map(|v| v.user_color(user))
+                .unwrap_or(app.settings.color);
             components::profile_card(
                 ui,
                 &name,
                 Some(presence_label(app.workspace_ui.profile_presence)),
                 Some(&app.workspace_ui.extras.profile_bio),
-                |ui| match &texture {
-                    Some(t) => {
-                        ui.add(egui::Image::new((t.id(), vec2(80.0, 80.0))).corner_radius(40));
-                    }
-                    None => components::initials_avatar(ui, 80.0, &name),
+                |ui| {
+                    super::avatar::Avatar::new(&name, super::avatar::AvatarSize::Xl)
+                        .color(color)
+                        .texture(texture.as_ref())
+                        .show(ui);
                 },
             );
-            if !app.workspace_ui.profile_status.is_empty() {
+            if !own && !app.workspace_ui.profile_status.is_empty() {
                 super::widgets::section_label(ui, "Status");
                 ui.label(&app.workspace_ui.profile_status);
             }
@@ -162,7 +180,10 @@ fn profile(app: &mut LanvoxApp, ctx: &egui::Context) {
                 .unwrap_or_default();
             ui.horizontal_wrapped(|ui| {
                 for role in &roles {
-                    ui.colored_label(color32(role.color), &role.name);
+                    ui.colored_label(
+                        theme::readable_text(color32(role.color), theme::color(theme::CHAT)),
+                        &role.name,
+                    );
                 }
             });
             if own {
@@ -241,9 +262,6 @@ fn profile(app: &mut LanvoxApp, ctx: &egui::Context) {
     );
     if result.primary {
         if own {
-            app.settings.do_not_disturb =
-                app.workspace_ui.profile_presence == Presence::DoNotDisturb;
-            app.settings.save();
             app.workspace(WorkspaceCommand::UpdateProfile {
                 status: app.workspace_ui.profile_status.clone(),
                 presence: app.workspace_ui.profile_presence,
@@ -344,10 +362,12 @@ fn group(app: &mut LanvoxApp, ctx: &egui::Context) {
             if friends.is_empty() {
                 ui.label("Adicione amigos para criar um grupo.");
             }
-            ui.label(format!(
-                "{} pessoa(s) selecionada(s)",
-                app.workspace_ui.group_members.len()
-            ));
+            let count = app.workspace_ui.group_members.len();
+            ui.label(if count == 1 {
+                "1 pessoa selecionada".to_owned()
+            } else {
+                format!("{count} pessoas selecionadas")
+            });
         },
     );
     if result.primary {
@@ -369,7 +389,9 @@ fn manage(app: &mut LanvoxApp, ctx: &egui::Context) {
         return;
     }
     let selected = app
-        .selected
+        .workspace_ui
+        .management_conversation
+        .or(app.selected)
         .and_then(|id| app.view.as_ref()?.channel(id))
         .cloned();
     let conversation = app
@@ -379,17 +401,19 @@ fn manage(app: &mut LanvoxApp, ctx: &egui::Context) {
             v.workspace
                 .conversations
                 .iter()
-                .find(|c| Some(c.channel) == app.selected)
+                .find(|c| Some(c.channel) == app.workspace_ui.management_conversation)
         })
         .cloned();
-    let guild = selected
-        .as_ref()
-        .filter(|c| c.guild > 0)
-        .map(|c| c.guild)
-        .or(app.guild);
+    let guild = app.workspace_ui.management_guild.or_else(|| {
+        if app.workspace_ui.management_conversation.is_some() {
+            None
+        } else {
+            app.guild
+        }
+    });
     if app.workspace_ui.extras.admin_guild != guild {
         app.workspace_ui.extras.admin_guild = guild;
-        app.workspace_ui.extras.admin_tab = 0;
+        app.workspace_ui.delete_guild_confirm = None;
         app.workspace_ui.extras.role = CommunityRole::default();
         app.workspace_ui.extras.invite_hours = 24;
         app.workspace_ui.extras.invite_uses = 10;
@@ -402,15 +426,22 @@ fn manage(app: &mut LanvoxApp, ctx: &egui::Context) {
             }));
         }
     }
+    let title = if let Some(conversation) = &conversation {
+        format!("Configurações · {}", conversation.name)
+    } else {
+        let name = guild
+            .and_then(|id| app.view.as_ref()?.guilds.iter().find(|g| g.id == id))
+            .map(|g| g.name.as_str())
+            .unwrap_or("Comunidades");
+        format!("Configurações · {name}")
+    };
     let result = components::modal(
         ctx,
         "community-settings",
-        if conversation.is_some() {
-            "Configurações da conversa"
-        } else {
-            "Configurações da comunidade"
-        },
-        components::ModalOptions::new(780.0).secondary("Concluir"),
+        &title,
+        components::ModalOptions::new(780.0)
+            .subtitle("Use os botões Salvar em cada seção. Fechar não envia alterações pendentes.")
+            .secondary("Fechar"),
         |ui| {
             if let Some(conversation) = &conversation {
                 conversation_settings(app, ui, conversation);
@@ -432,22 +463,37 @@ fn manage(app: &mut LanvoxApp, ctx: &egui::Context) {
                 app.workspace_ui.extras.admin_tab = 0;
             }
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
-                for (tab, label) in [
-                    (0, "Visão geral"),
-                    (1, "Canais"),
-                    (2, "Cargos"),
-                    (3, "Membros"),
-                    (4, "Convites"),
-                    (5, "Moderação"),
-                    (6, "Notificações"),
-                    (7, "Expressões"),
-                    (8, "Eventos"),
-                ] {
-                    if tab_allowed(tab) {
-                        ui.selectable_value(&mut app.workspace_ui.extras.admin_tab, tab, label);
-                    }
+                for (tab, label) in [(0, "Visão geral"), (6, "Notificações"), (8, "Eventos")] {
+                    ui.selectable_value(&mut app.workspace_ui.extras.admin_tab, tab, label);
                 }
+                let admin_label = match app.workspace_ui.extras.admin_tab {
+                    1 => "Canais",
+                    2 => "Cargos",
+                    3 => "Membros",
+                    4 => "Convites",
+                    5 => "Moderação",
+                    7 => "Expressões",
+                    _ => "Administração",
+                };
+                ui.menu_button(admin_label, |ui| {
+                    for (tab, label) in [
+                        (1, "Canais"),
+                        (2, "Cargos"),
+                        (3, "Membros"),
+                        (4, "Convites"),
+                        (5, "Moderação"),
+                        (7, "Expressões"),
+                    ] {
+                        if tab_allowed(tab)
+                            && ui
+                                .selectable_label(app.workspace_ui.extras.admin_tab == tab, label)
+                                .clicked()
+                        {
+                            app.workspace_ui.extras.admin_tab = tab;
+                            ui.close();
+                        }
+                    }
+                });
             });
             ui.separator();
             let Some(guild) = guild else {
@@ -486,66 +532,35 @@ fn manage(app: &mut LanvoxApp, ctx: &egui::Context) {
                     ui.add_space(12.0);
                     invite_entry(app, ui);
                     ui.add_space(12.0);
-                    ui.collapsing("Administração do host", |ui| {
-                        if app
-                            .view
-                            .as_ref()
-                            .is_some_and(|v| v.workspace.host_owner == Some(v.me))
-                        {
-                            let people: Vec<_> = app
-                                .view
-                                .as_ref()
-                                .map(|v| {
-                                    v.users
-                                        .values()
-                                        .filter(|u| u.id != v.me)
-                                        .map(|u| {
-                                            (
-                                                u.id,
-                                                u.name.clone(),
-                                                v.workspace.disabled_users.contains(&u.id),
-                                            )
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            for (user, name, disabled) in people {
-                                ui.horizontal(|ui| {
-                                    ui.label(name);
-                                    if ui
-                                        .button(if disabled {
-                                            "Reabilitar acesso"
-                                        } else {
-                                            "Bloquear acesso"
-                                        })
-                                        .clicked()
-                                    {
-                                        app.workspace_ui.host_access_confirmation =
-                                            Some((user, disabled));
-                                    }
-                                });
-                            }
-                            if ui.button("Criar cópia do banco de dados").clicked() {
-                                app.workspace(WorkspaceCommand::Backup);
-                            }
-                        } else {
-                            ui.label("Somente o proprietário do host pode administrar seu acesso.");
-                        }
-                    });
+                    if ui.button("Administrar acesso ao servidor…").clicked() {
+                        app.workspace_ui.managing = false;
+                        app.workspace_ui.delete_guild_confirm = None;
+                        app.modal = crate::app::Modal::Settings(crate::app::SettingsTab::Account);
+                    }
                     ui.collapsing("Sair ou excluir", |ui| {
                         if components::danger_button(ui, "Sair desta comunidade").clicked() {
                             app.workspace(WorkspaceCommand::LeaveGuild { guild });
                             app.workspace_ui.managing = false;
                         }
                         if admin {
-                            ui.checkbox(
-                                &mut app.workspace_ui.delete_guild_confirm,
-                                "Confirmo a exclusão permanente da comunidade e dos canais",
-                            );
+                            let mut confirmed =
+                                app.workspace_ui.delete_guild_confirm == Some(guild);
                             if ui
-                                .add_enabled_ui(app.workspace_ui.delete_guild_confirm, |ui| {
-                                    components::danger_button(ui, "Excluir comunidade")
-                                })
+                                .checkbox(
+                                    &mut confirmed,
+                                    format!(
+                                        "Confirmo a exclusão permanente de {name} e seus canais"
+                                    ),
+                                )
+                                .changed()
+                            {
+                                app.workspace_ui.delete_guild_confirm = confirmed.then_some(guild);
+                            }
+                            if ui
+                                .add_enabled_ui(
+                                    app.workspace_ui.delete_guild_confirm == Some(guild),
+                                    |ui| components::danger_button(ui, "Excluir comunidade"),
+                                )
                                 .inner
                                 .clicked()
                             {
@@ -618,6 +633,10 @@ fn manage(app: &mut LanvoxApp, ctx: &egui::Context) {
     );
     if result.cancelled() {
         app.workspace_ui.managing = false;
+        app.workspace_ui.delete_guild_confirm = None;
+        app.workspace_ui.delete_channel_confirm = false;
+        app.workspace_ui.management_guild = None;
+        app.workspace_ui.management_conversation = None;
     }
 }
 fn invite_entry(app: &mut LanvoxApp, ui: &mut egui::Ui) {
@@ -867,4 +886,53 @@ fn host_access_confirmation(app: &mut LanvoxApp, ctx: &egui::Context) {
     if confirm || result.cancelled() {
         app.workspace_ui.host_access_confirmation = None;
     }
+}
+
+/// Host-wide access is kept outside community settings.
+pub fn host_admin(app: &mut LanvoxApp, ui: &mut egui::Ui) {
+    ui.collapsing("Administração deste servidor", |ui| {
+        if app
+            .view
+            .as_ref()
+            .is_some_and(|v| v.workspace.host_owner == Some(v.me))
+        {
+            let people: Vec<_> = app
+                .view
+                .as_ref()
+                .map(|v| {
+                    v.users
+                        .values()
+                        .filter(|u| u.id != v.me)
+                        .map(|u| {
+                            (
+                                u.id,
+                                u.name.clone(),
+                                v.workspace.disabled_users.contains(&u.id),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (user, name, disabled) in people {
+                ui.horizontal(|ui| {
+                    ui.label(name);
+                    if ui
+                        .button(if disabled {
+                            "Reabilitar acesso"
+                        } else {
+                            "Bloquear acesso"
+                        })
+                        .clicked()
+                    {
+                        app.workspace_ui.host_access_confirmation = Some((user, disabled));
+                    }
+                });
+            }
+            if ui.button("Criar cópia do banco de dados").clicked() {
+                app.workspace(WorkspaceCommand::Backup);
+            }
+        } else {
+            ui.label("Somente o proprietário do host pode administrar seu acesso.");
+        }
+    });
 }

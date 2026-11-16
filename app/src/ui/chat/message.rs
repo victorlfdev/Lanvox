@@ -100,7 +100,10 @@ pub fn message_row(
                             ui.spacing_mut().item_spacing.x = 8.0;
                             if ui
                                 .link(RichText::new(&m.author_name).strong().color(
-                                    color32(m.author_color).lerp_to_gamma(theme::TEXT_BRIGHT, 0.15),
+                                    theme::readable_text(
+                                        color32(m.author_color),
+                                        theme::color(theme::CHAT),
+                                    ),
                                 ))
                                 .clicked()
                             {

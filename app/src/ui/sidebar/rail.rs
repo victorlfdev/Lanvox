@@ -26,8 +26,7 @@ pub fn rail(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                 });
                 let home = home.on_hover_text("Amigos e conversas");
                 if home.clicked() && app.connected() {
-                    app.home = true;
-                    app.selected = None;
+                    app.show_friends();
                 }
                 let (sep, _) = ui.allocate_exact_size(vec2(32.0, 10.0), Sense::hover());
                 ui.painter().line_segment(
@@ -70,7 +69,7 @@ pub fn rail(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                     );
                     let resp = rail_icon(
                         ui,
-                        Some(theme::color(theme::ACCENT)),
+                        Some(theme::color(theme::ACTION_FILL)),
                         selected,
                         |p, r, radius| {
                             if let Some(t) = &texture {
@@ -142,15 +141,12 @@ pub fn rail(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                                 })
                                 .unwrap_or_default();
                             for id in channels {
-                                app.mark_read(id);
+                                app.mark_all_read(id);
                             }
                             ui.close();
                         }
                         if ui.button("Notificações da comunidade").clicked() {
-                            app.guild = Some(g.id);
-                            app.workspace_ui.managing = true;
-                            app.workspace_ui.extras.admin_guild = Some(g.id);
-                            app.workspace_ui.extras.admin_tab = 6;
+                            app.open_guild_settings(Some(g.id), 6);
                             ui.close();
                         }
                     });
@@ -158,7 +154,14 @@ pub fn rail(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                         app.home = false;
                         app.guild = Some(g.id);
                         app.scroll_to_bottom = 3;
-                        app.selected = crate::ui::quick_switcher::channel_for_guild(app, g.id);
+                        if let Some(channel) =
+                            crate::ui::quick_switcher::channel_for_guild(app, g.id)
+                        {
+                            app.select_channel(channel);
+                        } else {
+                            app.show_friends();
+                            app.home = false;
+                        }
                     }
                 }
                 if app.connected() {
@@ -181,6 +184,15 @@ pub fn rail(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                         .data_mut(|data| data.insert_temp(egui::Id::unique("help-open"), true));
                 }
                 ui.menu_button("Hosts", |ui| {
+                    if app
+                        .view
+                        .as_ref()
+                        .and_then(|v| v.my_voice().channel)
+                        .is_some()
+                    {
+                        ui.label("Trocar de servidor encerra sua chamada atual.");
+                        ui.separator();
+                    }
                     for session in app.host_sessions() {
                         ui.horizontal(|ui| {
                             let label = format!(
@@ -263,7 +275,7 @@ pub(super) fn rail_icon(
     let hovered = resp.hovered();
     let radius: u8 = if selected || hovered { 14 } else { 18 };
     let bg = if selected || hovered {
-        fill.unwrap_or(theme::color(theme::ACCENT))
+        fill.unwrap_or(theme::color(theme::ACTION_FILL))
     } else {
         theme::color(theme::CHAT)
     };

@@ -8,7 +8,7 @@ pub(super) fn composer(app: &mut LanvoxApp, ui: &mut egui::Ui, ch: &Channel) {
             .as_ref()
             .is_some_and(|note| note.channel == ch.id)
         {
-            app.voice_note = None;
+            app.preserve_voice_note();
         }
         ui.label(RichText::new("Você não pode enviar mensagens aqui. Verifique suas permissões ou se a discussão foi arquivada.").small().color(theme::TEXT_MUTED));
         return;
@@ -32,6 +32,9 @@ pub(super) fn composer(app: &mut LanvoxApp, ui: &mut egui::Ui, ch: &Channel) {
     }
     if ui.input(|i| !i.raw.hovered_files.is_empty()) {
         ui.label(RichText::new("Solte seus arquivos aqui para anexar").color(theme::ACCENT));
+    }
+    if can_attach {
+        app.restore_voice_note(ch.id);
     }
     voice_note_controls(app, ui, ch.id, can_attach);
     staged_files(app, ui, ch.id);
@@ -353,6 +356,7 @@ pub(super) fn composer(app: &mut LanvoxApp, ui: &mut egui::Ui, ch: &Channel) {
         ) {
             Ok(recorder) => {
                 app.voice_note = Some(crate::app::VoiceNote {
+                    identity: app.local_identity.clone(),
                     host: app.current_host(),
                     channel: ch.id,
                     recorder: Some(recorder),
@@ -390,7 +394,8 @@ fn voice_note_controls(
         return;
     };
     if note.channel != channel || note.host != app.current_host() || !can_attach {
-        // Dropping an active recorder immediately stops its microphone worker.
+        app.voice_note = Some(note);
+        app.preserve_voice_note();
         return;
     }
     let mut discard = false;
@@ -500,12 +505,16 @@ fn voice_note_controls(
             }
         });
     if discard {
+        app.remove_voice_draft(&note);
         return;
     }
     if finish {
         if let Some(recorder) = note.recorder.take() {
             match recorder.finish() {
-                Ok(bytes) => note.bytes = Some(bytes),
+                Ok(bytes) => {
+                    note.bytes = Some(bytes);
+                    app.save_voice_preview(&note);
+                }
                 Err(error) => {
                     app.notify(error);
                     return;
@@ -521,12 +530,17 @@ fn voice_note_controls(
                 return;
             }
         }
-        if let Some(bytes) = note.bytes.take() {
-            app.stage_attachment(
+        if let Some(bytes) = note.bytes.clone() {
+            if let Err(error) = app.stage_voice_attachment(
                 channel,
                 format!("mensagem-de-voz-{:08x}.wav", rand::random::<u32>()),
                 bytes,
-            );
+            ) {
+                app.notify_error(error);
+                app.voice_note = Some(note);
+                return;
+            }
+            app.remove_voice_draft(&note);
         }
         return;
     }

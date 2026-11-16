@@ -146,6 +146,10 @@ cargo run --locked -- --screenshot ./target/qa/settings.png --screenshot-view se
 
 Também existem modos `home`, `friends`, `dm`, `call`, `voice-settings`, `video-settings`, `stream-settings`, `manage`, `profile`, `group`, `share`, `appearance`, `search`, `inbox`, `roles`, `events`, `expressions`, `forum` e `poll`. Dados e métricas da demonstração não são medições.
 
+Para conferir janela mínima, escala ampliada e títulos longos, combine `--screenshot-size 940x500 --screenshot-scale 1.4 --screenshot-long-names`. O modo `participants` também permite conferir o diálogo de participantes em janelas estreitas. A demonstração usa dispositivos fictícios e não grava preferências pessoais.
+
+Ao selecionar um canal de voz, o cliente mostra a sala antes de entrar; use **Entrar na voz** para participar. Trocar de conversa encerra uma gravação de mensagem de voz em andamento e preserva o áudio como rascunho local, recuperado ao voltar à conversa. O envio continua exigindo anexar e enviar; **Descartar** remove o rascunho.
+
 Qualidade em VPN real, dispositivos e uso prolongado precisam de ensaios nas máquinas dos participantes.
 
 ## Licença

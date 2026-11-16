@@ -82,12 +82,13 @@ pub const TILE_BG: Color32 = Color32::from_rgb(0x1e, 0x1f, 0x22);
 
 pub const TEXT: Color32 = Color32::from_rgb(0xdb, 0xde, 0xe1);
 pub const TEXT_BRIGHT: Color32 = Color32::from_rgb(0xff, 0xff, 0xff);
-pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x94, 0x9b, 0xa4);
+pub const TEXT_MUTED: Color32 = Color32::from_rgb(0xa8, 0xad, 0xb5);
 pub const TEXT_FAINT: Color32 = Color32::from_rgb(0xa8, 0xad, 0xb5);
 
-pub const ACCENT: Color32 = Color32::from_rgb(0x0e, 0x94, 0x88);
+pub const ACCENT: Color32 = Color32::from_rgb(0x2f, 0xc7, 0xb6);
+pub const ACTION_FILL: Color32 = Color32::from_rgb(0x06, 0x67, 0x5f);
 pub const GREEN: Color32 = Color32::from_rgb(0x23, 0xa5, 0x59);
-pub const RED: Color32 = Color32::from_rgb(0xf2, 0x3f, 0x43);
+pub const RED: Color32 = Color32::from_rgb(0xd4, 0x2e, 0x38);
 /// Thin divider / header shadow line.
 pub const DIVIDER: Color32 = Color32::from_rgb(0x26, 0x27, 0x2b);
 /// Row background of a hovered chat message.
@@ -100,6 +101,41 @@ pub const SIDEBAR_W: f32 = 240.0;
 pub const MEMBERS_W: f32 = 240.0;
 pub const HEADER_H: f32 = 48.0;
 pub const USER_PANEL_H: f32 = 56.0;
+
+pub fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+    fn luminance(c: Color32) -> f32 {
+        let linear = |v: u8| {
+            let v = f32::from(v) / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(c.r()) + 0.7152 * linear(c.g()) + 0.0722 * linear(c.b())
+    }
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Retain member-chosen hues while making text readable on the active surface.
+pub fn readable_text(chosen: Color32, background: Color32) -> Color32 {
+    for step in 0..=20 {
+        let candidate = chosen.lerp_to_gamma(TEXT_BRIGHT, step as f32 / 20.0);
+        if contrast_ratio(candidate, background) >= 4.5 {
+            return candidate;
+        }
+    }
+    TEXT_BRIGHT
+}
+
+pub fn on_color(background: Color32) -> Color32 {
+    if contrast_ratio(Color32::BLACK, background) > contrast_ratio(Color32::WHITE, background) {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    }
+}
 
 pub fn r(v: u8) -> CornerRadius {
     CornerRadius::same(v)
@@ -171,7 +207,7 @@ fn apply_style(ctx: &egui::Context) {
         v.faint_bg_color = color(SIDEBAR);
         v.override_text_color = Some(TEXT);
         v.hyperlink_color = LINK;
-        v.selection.bg_fill = ACCENT;
+        v.selection.bg_fill = ACTION_FILL;
         v.selection.stroke = Stroke::new(1.0, TEXT_BRIGHT);
         v.window_corner_radius = r(8);
         v.menu_corner_radius = r(6);
@@ -192,7 +228,7 @@ fn apply_style(ctx: &egui::Context) {
         v.widgets.hovered.bg_fill = color(SELECTED);
         v.widgets.hovered.corner_radius = r(4);
         v.widgets.active.weak_bg_fill = Color32::from_rgb(0x80, 0x82, 0x8b);
-        v.widgets.active.bg_fill = ACCENT;
+        v.widgets.active.bg_fill = ACTION_FILL;
         v.widgets.active.corner_radius = r(4);
         v.widgets.inactive.bg_stroke = Stroke::NONE;
         v.widgets.hovered.bg_stroke = Stroke::NONE;

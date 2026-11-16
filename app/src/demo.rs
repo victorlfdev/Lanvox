@@ -8,6 +8,20 @@ use crate::model::*;
 use crate::state::ServerView;
 
 pub fn fill(app: &mut LanvoxApp) {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(scale) = args
+        .windows(2)
+        .find(|w| w[0] == "--screenshot-scale")
+        .and_then(|w| w[1].parse::<f32>().ok())
+        .filter(|s| s.is_finite())
+    {
+        app.settings.ui_scale = scale.clamp(0.8, 1.4);
+    }
+    app.device_cache = Some((
+        vec!["Microfone de demonstração".into()],
+        vec!["Saída de demonstração".into()],
+        vec!["Câmera de demonstração".into()],
+    ));
     let now = now_secs();
     let users = vec![
         User {
@@ -191,7 +205,7 @@ pub fn fill(app: &mut LanvoxApp) {
         streams: vec![StreamInfo {
             owner: 3,
             kind: StreamKind::Screen,
-            label: "Screen 1".into(),
+            label: "Tela principal".into(),
             width: 1920,
             height: 1080,
             fps: 30,
@@ -243,7 +257,6 @@ pub fn fill(app: &mut LanvoxApp) {
     app.guild = Some(1);
 
     // `--demo-view call` shows the call with a sample stream instead of the chat.
-    let args: Vec<String> = std::env::args().collect();
     let target = args
         .windows(2)
         .find(|w| w[0] == "--screenshot-view")
@@ -292,6 +305,7 @@ pub fn fill(app: &mut LanvoxApp) {
                 .unwrap_or_default();
         }
         "inbox" => app.workspace_ui.inbox_open = true,
+        "participants" => app.workspace_ui.members_overlay_open = true,
         "roles" | "events" | "expressions" => {
             app.workspace_ui.managing = true;
             app.workspace_ui.extras.admin_guild = Some(1);
@@ -376,6 +390,13 @@ pub fn fill(app: &mut LanvoxApp) {
         app.pictures.put(key, w, h, sample_desktop(w, h), 0);
         app.watching.insert(key);
         app.focused = Some(key);
+    }
+    if args.iter().any(|a| a == "--screenshot-long-names") {
+        if let Some(view) = &mut app.view {
+            for channel in &mut view.channels {
+                channel.name = "Conversa com um nome bastante longo aqui".into();
+            }
+        }
     }
 }
 

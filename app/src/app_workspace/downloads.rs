@@ -210,7 +210,7 @@ impl LanvoxApp {
                 }
                 FileTask::Avatar(bytes) => self.workspace_ui.profile_avatar = bytes,
                 FileTask::SaveTarget { info, path } => self.begin_streamed_save(info, path),
-                FileTask::Error(error) => self.notify(error),
+                FileTask::Error(error) => self.notify_error(error),
                 FileTask::Saved(message) => self.notify(message),
                 FileTask::IdentityImported => {
                     self.local_identity =

@@ -72,9 +72,13 @@ pub(super) fn poll_row(app: &mut LanvoxApp, ui: &mut egui::Ui, message: MessageI
             }
             ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    RichText::new(format!("{} participante(s)", poll.votes.len()))
-                        .small()
-                        .color(theme::TEXT_MUTED),
+                    RichText::new(if poll.votes.len() == 1 {
+                        "1 participante".into()
+                    } else {
+                        format!("{} participantes", poll.votes.len())
+                    })
+                    .small()
+                    .color(theme::TEXT_MUTED),
                 );
                 if !poll.closed {
                     vote = ui

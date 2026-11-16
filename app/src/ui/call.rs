@@ -63,12 +63,16 @@ pub fn show(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
                 icons::paint(ui.painter(), r, Icon::Speaker, theme::TEXT_MUTED);
-                ui.label(
-                    RichText::new(&ch.name)
-                        .strong()
-                        .size(16.0)
-                        .color(theme::TEXT_BRIGHT),
-                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&ch.name)
+                            .strong()
+                            .size(16.0)
+                            .color(theme::TEXT_BRIGHT),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&ch.name);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     add_people_menu(app, ui, channel)
                 });

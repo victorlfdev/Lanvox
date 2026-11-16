@@ -41,7 +41,7 @@ pub(super) fn home_list(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         },
     );
     if resp.clicked() {
-        app.selected = None;
+        app.show_friends();
     }
     ui.add_space(12.0);
     ui.horizontal(|ui| {
@@ -51,7 +51,7 @@ pub(super) fn home_list(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             if widgets::icon_button(
                 ui,
                 Icon::Plus,
-                18.0,
+                28.0,
                 theme::color(theme::TEXT_MUTED),
                 "Novo grupo",
             )

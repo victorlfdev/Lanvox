@@ -21,7 +21,7 @@ pub fn channels(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                 )
                 .clicked()
                 {
-                    app.workspace_ui.managing = true;
+                    app.open_guild_settings(app.guild, 0);
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     let name = if app.home {
@@ -373,7 +373,7 @@ pub(super) fn channel_list(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             .map(|v| v.workspace.categories.iter().map(|c| c.id).collect())
             .unwrap_or_default();
         list.retain(|c| known.contains(c));
-        app.settings.save();
+        app.save_preferences();
     }
 
     if manage {

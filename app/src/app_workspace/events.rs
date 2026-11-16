@@ -24,7 +24,7 @@ impl LanvoxApp {
                         view.history_loading.remove(&channel);
                     }
                 }
-                self.notify(reason);
+                self.notify_error(reason);
             } else {
                 self.on_workspace_event(event);
             }
@@ -302,8 +302,10 @@ impl LanvoxApp {
                     .is_some_and(|(p, _)| *p == parent)
                 {
                     if let Some((_, draft)) = self.workspace_ui.forum_pending_draft.take() {
-                        self.compose.insert(channel, draft);
+                        self.workspace_ui.extras.forum_drafts.remove(&parent);
+                        self.compose.insert(channel, draft.body);
                         self.save_drafts();
+                        self.notify("Discussão criada. Confira a mensagem e pressione Enviar para publicá-la.");
                     }
                 }
                 self.home = false;
@@ -502,9 +504,9 @@ impl LanvoxApp {
                         }
                     }
                     self.workspace_ui.upload_names.remove(&operation);
-                    self.settings.save();
+                    self.save_preferences();
                 }
-                self.notify(reason);
+                self.notify_error(reason);
             }
             WorkspaceEvent::MessageChanged { ref message, .. }
                 if self.selected == Some(message.channel) && self.chat_at_bottom =>

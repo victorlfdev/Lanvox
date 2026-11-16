@@ -262,22 +262,27 @@ fn open_item(app: &mut LanvoxApp, item: &Item) {
         Dest::Guild(guild) => {
             app.home = false;
             app.guild = Some(guild);
-            app.selected = channel_for_guild(app, guild);
+            if let Some(channel) = channel_for_guild(app, guild) {
+                app.select_channel(channel);
+            } else {
+                app.show_friends();
+                app.home = false;
+            }
             let scope = host_scope(app);
             push_recent(
                 app.settings.recents.entry(scope).or_default(),
                 item.dest.key(),
             );
-            app.settings.save();
+            app.save_preferences();
         }
         Dest::Channel(id) if item.guild == 0 => {
             app.home = true;
-            app.selected = Some(id);
+            app.select_channel(id);
         }
         Dest::Channel(id) => {
             app.home = false;
             app.guild = Some(item.guild);
-            app.selected = Some(id);
+            app.select_channel(id);
         }
     }
 }
@@ -308,7 +313,7 @@ fn track(app: &mut LanvoxApp) {
             .last_channels
             .insert(format!("{scope}|{channel_guild}"), id);
     }
-    app.settings.save();
+    app.save_preferences();
 }
 
 pub fn show(app: &mut LanvoxApp, ctx: &egui::Context) {
@@ -472,6 +477,17 @@ pub fn show(app: &mut LanvoxApp, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_navigation_clears_a_reply_from_the_previous_conversation() {
+        let (mut app, _) = crate::app::ui_regressions::fixture();
+        app.workspace_ui.reply_to = Some(1);
+        app.workspace_ui.pinned_only = true;
+        open_item(&mut app, &item(2, ItemKind::Text, "links", "community"));
+        assert_eq!(app.selected, Some(2));
+        assert_eq!(app.workspace_ui.reply_to, None);
+        assert!(!app.workspace_ui.pinned_only);
+    }
 
     fn item(id: u32, kind: ItemKind, label: &str, detail: &str) -> Item {
         let dest = if kind == ItemKind::Guild {

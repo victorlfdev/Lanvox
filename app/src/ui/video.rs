@@ -356,9 +356,9 @@ fn poster(
         button.center(),
         26.0,
         if hovered {
-            theme::ACCENT
+            theme::ACTION_FILL
         } else {
-            theme::ACCENT.gamma_multiply(0.8)
+            theme::ACTION_FILL.gamma_multiply(0.8)
         },
     );
     play_triangle(painter, button, Color32::WHITE);

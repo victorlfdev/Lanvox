@@ -248,7 +248,7 @@ impl<'a> Avatar<'a> {
                 Align2::CENTER_CENTER,
                 initials(self.name),
                 FontId::proportional(radius * 0.8),
-                Color32::WHITE,
+                theme::on_color(color32(fallback_color(self.user, self.color))),
             );
         }
         if self.speaking {

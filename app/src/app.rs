@@ -33,7 +33,12 @@ pub use sessions::BackgroundHost;
 mod connection;
 mod server_msgs;
 mod streaming;
+#[cfg(test)]
+#[path = "app_ui_regressions.rs"]
+pub(crate) mod ui_regressions;
 mod voice;
+#[path = "app_voice_notes.rs"]
+mod voice_notes;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -95,6 +100,7 @@ pub struct ScreenshotJob {
 
 /// Private recording/preview, scoped to the host and conversation that started it.
 pub struct VoiceNote {
+    pub identity: String,
     pub host: String,
     pub channel: ChannelId,
     pub recorder: Option<crate::media::audio::voice_note::Recorder>,
@@ -140,6 +146,7 @@ pub struct LanvoxApp {
     pub modal: Modal,
     pub picker: PickerState,
     pub notice: Option<(String, Instant)>,
+    pub notice_queue: std::collections::VecDeque<String>,
     pub screenshot: Option<ScreenshotJob>,
     pub demo: bool,
     pub last_typing_sent: Instant,
@@ -166,6 +173,8 @@ pub struct LanvoxApp {
     pub chat_at_bottom: bool,
     pub workspace_ui: WorkspaceUi,
     pub voice_note: Option<VoiceNote>,
+    pub voice_drafts: HashMap<String, Vec<u8>>,
+    pub voice_drafts_loaded: HashSet<String>,
     pub attachment_textures: HashMap<u64, egui::TextureHandle>,
     pub videos: crate::ui::video::VideoUi,
     pub avatar_textures: HashMap<UserId, (u64, egui::TextureHandle)>,
@@ -196,7 +205,11 @@ impl LanvoxApp {
         if screenshot.is_none() && settings.check_updates_on_start && crate::updater::configured() {
             crate::updater::check();
         }
-        let local_identity = crate::notifications::identity_fingerprint().unwrap_or_default();
+        let local_identity = if screenshot.is_some() {
+            "demo-identity".into()
+        } else {
+            crate::notifications::identity_fingerprint().unwrap_or_default()
+        };
         let pictures = PictureStore::default();
         let decoder = Decoder::start(pictures.clone(), cc.egui_ctx.clone());
         let audio_shared = Arc::new(AudioShared::default());
@@ -217,7 +230,7 @@ impl LanvoxApp {
         let demo = screenshot.is_some();
         let mut app = Self {
             host_input: if settings.host_name.is_empty() {
-                format!("{}'s server", settings.name)
+                format!("Servidor de {}", settings.name)
             } else {
                 settings.host_name.clone()
             },
@@ -253,6 +266,7 @@ impl LanvoxApp {
             modal: Modal::None,
             picker: PickerState::default(),
             notice: None,
+            notice_queue: std::collections::VecDeque::new(),
             screenshot: screenshot.map(|path| ScreenshotJob {
                 path,
                 frames: 0,
@@ -281,6 +295,8 @@ impl LanvoxApp {
             chat_at_bottom: true,
             workspace_ui: WorkspaceUi::default(),
             voice_note: None,
+            voice_drafts: HashMap::new(),
+            voice_drafts_loaded: HashSet::new(),
             attachment_textures: HashMap::new(),
             videos: Default::default(),
             avatar_textures: HashMap::new(),
@@ -297,7 +313,9 @@ impl LanvoxApp {
             pending_message: None,
             background_hosts: Vec::new(),
         };
-        crate::notifications::set_hotkeys(app.settings.mute_hotkey, app.settings.deafen_hotkey);
+        if !demo {
+            crate::notifications::set_hotkeys(app.settings.mute_hotkey, app.settings.deafen_hotkey);
+        }
         if demo {
             crate::demo::fill(&mut app);
         } else {
@@ -309,8 +327,43 @@ impl LanvoxApp {
         app
     }
 
+    /// Demo rendering and headless interaction tests never write personal preferences.
+    pub fn save_preferences(&self) {
+        if !self.demo {
+            self.settings.save();
+        }
+    }
+
     pub fn notify(&mut self, text: impl Into<String>) {
-        self.notice = Some((text.into(), Instant::now()));
+        let text = text.into();
+        if self.notice.is_none() {
+            self.notice = Some((text, Instant::now()));
+        } else {
+            if self.notice_queue.len() >= 8 {
+                self.notice_queue.pop_front();
+            }
+            self.notice_queue.push_back(text);
+        }
+    }
+
+    pub fn notify_error(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if self.workspace_ui.operation_errors.back() != Some(&text) {
+            if self.workspace_ui.operation_errors.len() >= 20 {
+                self.workspace_ui.operation_errors.pop_front();
+            }
+            self.workspace_ui.operation_errors.push_back(text);
+        }
+    }
+
+    pub fn notifications_paused(&self) -> bool {
+        self.settings.do_not_disturb
+            || self.view.as_ref().is_some_and(|v| {
+                v.workspace
+                    .profiles
+                    .iter()
+                    .any(|p| p.user == v.me && p.presence == Presence::DoNotDisturb)
+            })
     }
 
     pub fn connected(&self) -> bool {
@@ -399,12 +452,12 @@ impl LanvoxApp {
             let channel = view.my_voice().channel;
             let members = channel.map(|c| view.in_voice(c)).unwrap_or_default();
             if let Some(sound) = self.sfx_watch.members(view.me, channel, &members) {
-                if !self.settings.do_not_disturb {
+                if !self.notifications_paused() {
                     crate::sfx::play(sound, &self.settings);
                 }
             }
         }
-        let ringing = !self.settings.do_not_disturb && !self.ringing().is_empty();
+        let ringing = !self.notifications_paused() && !self.ringing().is_empty();
         if self.sfx_watch.ring(ringing) {
             crate::sfx::play(crate::sfx::Sfx::Ring, &self.settings);
         }
@@ -412,10 +465,12 @@ impl LanvoxApp {
         self.poll_connection(ctx);
         self.poll_network();
         self.poll_background_hosts(ctx);
-        let discard_voice_note = self.voice_note.as_ref().is_some_and(|note| {
-            note.host != self.current_host()
+        let pause_voice_note = self.voice_note.as_ref().is_some_and(|note| {
+            note.identity != self.local_identity
+                || note.host != self.current_host()
                 || self.selected != Some(note.channel)
-                || !self.client.as_ref().is_some_and(|client| client.is_alive())
+                || (note.recorder.is_some()
+                    && !self.client.as_ref().is_some_and(|client| client.is_alive()))
                 || (self
                     .view
                     .as_ref()
@@ -426,9 +481,8 @@ impl LanvoxApp {
                     && (self.audio_shared.muted.load(Ordering::Relaxed)
                         || self.audio_shared.deafened.load(Ordering::Relaxed)))
         });
-        if discard_voice_note {
-            self.voice_note = None;
-            self.notify("Gravação de voz descartada ao mudar de conversa, desconectar ou silenciar o microfone.");
+        if pause_voice_note {
+            self.preserve_voice_note();
         }
         if let Some((host, channel, message)) = self.pending_message.clone() {
             if self
@@ -516,7 +570,7 @@ impl LanvoxApp {
 
 impl eframe::App for LanvoxApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.voice_note = None;
+        self.preserve_voice_note();
         self.videos = Default::default();
         self.workspace_ui.chunk_downloads.clear();
         for host in &mut self.background_hosts {

@@ -1,131 +1,42 @@
 use super::*;
 
 pub(super) fn settings(app: &mut LanvoxApp, ctx: &egui::Context, tab: SettingsTab) {
-    let mut close = false;
     let mut new_tab = tab;
-    let resp = egui::Modal::new(egui::Id::unique("settings"))
-        .frame(
-            Frame::new()
-                .fill(theme::color(theme::CHAT))
-                .corner_radius(8),
-        )
-        .show(ctx, |ui| {
-            let size = vec2(
-                (ctx.content_rect().width() - 80.0).clamp(560.0, 900.0),
-                (ctx.content_rect().height() - 80.0).clamp(380.0, 620.0),
-            );
-            ui.set_min_size(size);
-            ui.set_max_size(size);
-            ui.horizontal_top(|ui| {
-                // Navigation.
-                Frame::new()
-                    .fill(theme::color(theme::SIDEBAR))
-                    .inner_margin(Margin::same(14))
-                    .corner_radius(egui::CornerRadius {
-                        nw: 8,
-                        sw: 8,
-                        ne: 0,
-                        se: 0,
-                    })
-                    .show(ui, |ui| {
-                        ui.vertical(|ui| {
-                            ui.set_width(180.0);
-                            ui.set_max_width(180.0);
-                            ui.set_min_height(size.y - 28.0);
-                            widgets::section_label(ui, "Preferências");
-                            ui.add_space(8.0);
-                            for (target, label) in [
-                                (SettingsTab::Account, "Minha conta"),
-                                (SettingsTab::Appearance, "Aparência"),
-                                (SettingsTab::Voice, "Voz e áudio"),
-                                (SettingsTab::Video, "Câmera"),
-                                (SettingsTab::Streaming, "Compartilhamento de tela"),
-                            ] {
-                                if ui
-                                    .add_sized(
-                                        [180.0, 40.0],
-                                        egui::Button::new(label).selected(tab == target).wrap(),
-                                    )
-                                    .clicked()
-                                {
-                                    new_tab = target;
-                                }
-                            }
-                        });
-                    });
-                ui.vertical(|ui| {
-                    // Never wider than the modal minus the nav column, so
-                    // wide content wraps/scrolls instead of pushing the modal
-                    // past the window.
-                    let content_w = (size.x - 230.0).max(280.0);
-                    ui.set_width(content_w);
-                    ui.set_max_width(content_w);
-                    ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
-                    ui.add_space(16.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(8.0);
-                        let title = match tab {
-                            SettingsTab::Account => "Minha conta",
-                            SettingsTab::Appearance => "Aparência",
-                            SettingsTab::Voice => "Voz e áudio",
-                            SettingsTab::Video => "Câmera",
-                            SettingsTab::Streaming => "Compartilhamento de tela",
-                        };
-                        ui.label(
-                            RichText::new(title)
-                                .size(20.0)
-                                .strong()
-                                .color(theme::color(theme::TEXT_BRIGHT)),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.add_space(12.0);
-                            if widgets::icon_button(
-                                ui,
-                                Icon::Close,
-                                28.0,
-                                theme::color(theme::TEXT_MUTED),
-                                "Fechar (Esc)",
-                            )
-                            .clicked()
-                            {
-                                close = true;
-                            }
-                        });
-                    });
-                    ui.add_space(8.0);
-                    egui::ScrollArea::vertical()
-                        .max_height(size.y - 74.0)
-                        .max_width(content_w)
-                        .auto_shrink(false)
-                        .show(ui, |ui| {
-                            Frame::new()
-                                .inner_margin(Margin {
-                                    left: 8,
-                                    right: 20,
-                                    top: 0,
-                                    bottom: 12,
-                                })
-                                .show(ui, |ui| {
-                                    ui.set_max_width((content_w - 28.0).max(240.0));
-                                    match tab {
-                                        SettingsTab::Account => account_tab(app, ui),
-                                        SettingsTab::Appearance => appearance_tab(app, ui),
-                                        SettingsTab::Voice => voice_tab(app, ui),
-                                        SettingsTab::Video => video_tab(app, ui),
-                                        SettingsTab::Streaming => streaming_tab(app, ui),
-                                    }
-                                });
-                        });
-                });
+    let result = components::modal(
+        ctx,
+        "settings",
+        "Preferências",
+        components::ModalOptions::new(860.0)
+            .subtitle(
+                "Os ajustes são aplicados ao alterar. Fechar ou Esc preserva suas alterações.",
+            )
+            .secondary("Fechar"),
+        |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (target, label) in [
+                    (SettingsTab::Account, "Minha conta"),
+                    (SettingsTab::Appearance, "Aparência"),
+                    (SettingsTab::Voice, "Voz e áudio"),
+                    (SettingsTab::Video, "Câmera"),
+                    (SettingsTab::Streaming, "Compartilhamento de tela"),
+                ] {
+                    if ui.selectable_label(tab == target, label).clicked() {
+                        new_tab = target;
+                    }
+                }
             });
-        });
-    if resp.should_close() {
-        close = true;
-    }
-    if close {
-        app.modal = Modal::None;
+            ui.separator();
+            ui.push_id(format!("settings-{tab:?}"), |ui| match tab {
+                SettingsTab::Account => account_tab(app, ui),
+                SettingsTab::Appearance => appearance_tab(app, ui),
+                SettingsTab::Voice => voice_tab(app, ui),
+                SettingsTab::Video => video_tab(app, ui),
+                SettingsTab::Streaming => streaming_tab(app, ui),
+            });
+        },
+    );
+    if result.cancelled() || new_tab != tab {
         app.audio_shared.mic_test.store(false, Ordering::Relaxed);
-        app.camera_preview = None;
         if app
             .view
             .as_ref()
@@ -134,12 +45,13 @@ pub(super) fn settings(app: &mut LanvoxApp, ctx: &egui::Context, tab: SettingsTa
         {
             app.audio = None;
         }
-        app.settings.save();
-    } else if new_tab != tab {
-        if new_tab != SettingsTab::Video {
-            app.camera_preview = None;
-        }
-        app.modal = Modal::Settings(new_tab);
+        app.camera_preview = None;
+        app.save_preferences();
+        app.modal = if result.cancelled() {
+            Modal::None
+        } else {
+            Modal::Settings(new_tab)
+        };
     }
 }
 
@@ -215,13 +127,20 @@ pub(super) fn appearance_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
 }
 
 pub(super) fn account_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
+    let connected = app.demo || app.client.as_ref().is_some_and(|c| c.is_alive());
     ui.horizontal(|ui| {
         if app.connected() && ui.button("Editar perfil e presença").clicked() {
             app.open_profile(app.me());
         }
         ui.checkbox(&mut app.settings.notifications, "Notificações do sistema");
     });
-    ui.checkbox(&mut app.settings.do_not_disturb, "Não perturbar");
+    ui.checkbox(
+        &mut app.settings.do_not_disturb,
+        "Pausar notificações neste dispositivo",
+    )
+    .on_hover_text(
+        "Não altera sua presença nos servidores. Para mudar sua presença, abra seu perfil.",
+    );
     ui.checkbox(
         &mut app.settings.notification_preview,
         "Mostrar conteúdo nas notificações",
@@ -296,6 +215,13 @@ pub(super) fn account_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         }
     });
     host_identity_controls(app, ui);
+    if app
+        .view
+        .as_ref()
+        .is_some_and(|v| v.workspace.host_owner == Some(v.me))
+    {
+        crate::ui::workspace::host_admin(app, ui);
+    }
     if let Some(client) = &app.client {
         ui.separator();
         ui.label(format!("Host autenticado: {}", client.address));
@@ -337,14 +263,19 @@ pub(super) fn account_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                widgets::avatar(
-                    ui,
-                    72.0,
+                super::super::avatar::Avatar::new(
                     &app.settings.name,
-                    color32(app.settings.color),
-                    false,
-                    Some(true),
-                );
+                    super::super::avatar::AvatarSize::Xl,
+                )
+                .color(app.settings.color)
+                .presence(super::super::avatar::PresenceState::resolve(
+                    connected,
+                    app.view
+                        .as_ref()
+                        .and_then(|v| v.workspace.profiles.iter().find(|p| p.user == v.me))
+                        .map(|p| p.presence),
+                ))
+                .show(ui);
                 ui.vertical(|ui| {
                     ui.add_space(14.0);
                     ui.label(
@@ -354,8 +285,12 @@ pub(super) fn account_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                             .color(theme::color(theme::TEXT_BRIGHT)),
                     );
                     ui.label(
-                        RichText::new(if app.connected() {
-                            "Disponível"
+                        RichText::new(if connected {
+                            app.view
+                                .as_ref()
+                                .and_then(|v| v.workspace.profiles.iter().find(|p| p.user == v.me))
+                                .map(|p| crate::ui::workspace::presence_label(p.presence))
+                                .unwrap_or("Disponível")
                         } else {
                             "Sem conexão"
                         })
@@ -379,25 +314,15 @@ pub(super) fn account_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         );
     }
     ui.add_space(8.0);
-    widgets::section_label(ui, "Cor do avatar");
-    ui.horizontal(|ui| {
-        for c in AVATAR_COLORS {
-            let (rect, r) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
-            ui.painter().circle_filled(rect.center(), 13.0, color32(c));
-            if app.settings.color == c {
-                ui.painter()
-                    .circle_stroke(rect.center(), 15.0, Stroke::new(2.0, Color32::WHITE));
-            }
-            if r.clicked() {
-                app.settings.color = c;
-            }
-        }
-    });
+    components::avatar_color_picker(ui, &mut app.settings.color);
     if let Some(h) = &app.hosted {
         ui.add_space(16.0);
         widgets::section_label(ui, "Seu host");
         let ips = local_addresses();
-        ui.label(format!("\"{}\" is running on port {}.", h.name, h.port));
+        ui.label(format!(
+            "Servidor {} em execução na porta {}.",
+            h.name, h.port
+        ));
         if !ips.is_empty() {
             ui.label(
                 RichText::new(format!(
@@ -439,7 +364,7 @@ fn update_section(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         )
         .changed()
     {
-        app.settings.save();
+        app.save_preferences();
     }
     let state = updater::state();
     match &state {

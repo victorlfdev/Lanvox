@@ -1,69 +1,6 @@
 use super::*;
 
 pub(super) fn voice_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
-    let mut changed = ui
-        .checkbox(&mut app.settings.echo_cancellation, "Cancelamento de eco")
-        .changed();
-    changed |= ui
-        .checkbox(&mut app.settings.noise_suppression, "Supressão de ruído")
-        .changed();
-    if app.settings.noise_suppression {
-        changed |= ui
-            .checkbox(
-                &mut app.settings.rnnoise,
-                "Usar RNNoise (rede neural, mais forte)",
-            )
-            .changed();
-    }
-    if changed {
-        app.audio_shared.processor.set_rnnoise(app.settings.rnnoise);
-        app.audio_shared.processor.configure(
-            app.settings.echo_cancellation,
-            app.settings.noise_suppression,
-        );
-    }
-    ui.collapsing("Ajuste avançado de eco", |ui| {
-        if ui
-            .add(
-                egui::Slider::new(&mut app.settings.echo_delay_ms, 0..=500)
-                    .suffix(" ms")
-                    .text("Atraso do dispositivo"),
-            )
-            .changed()
-        {
-            app.audio_shared
-                .processor
-                .set_delay_ms(app.settings.echo_delay_ms);
-        }
-    });
-    if let Some(client) = &app.client {
-        let stats = client.media_stats();
-        ui.label(if stats.active {
-            "Mídia por UDP cifrado: ativa"
-        } else {
-            "Mídia por UDP: aguardando rota"
-        });
-        ui.label(format!(
-            "Enviado {:.1} MiB · recebido {:.1} MiB · descartes {} · fila {} KiB",
-            stats.sent_bytes as f64 / 1048576.0,
-            stats.received_bytes as f64 / 1048576.0,
-            stats.dropped,
-            stats.queued_bytes / 1024
-        ));
-        let people: Vec<_> = app
-            .view
-            .as_ref()
-            .map(|v| v.users.values().map(|u| (u.id, u.name.clone())).collect())
-            .unwrap_or_default();
-        for (id, name) in people {
-            if let Some(stats) = app.mixer.voice_stats(id) {
-                ui.label(format!(
-                    "{name}: jitter {:.1}ms · buffer {}ms · perdas {} · atrasados {}",
-                    stats.jitter_ms, stats.target_ms, stats.lost, stats.late
-                ));
-            }
-        }
-    }
     if ui.button("Atualizar dispositivos").clicked() {
         app.device_cache = None;
         app.restart_audio();
@@ -230,8 +167,77 @@ pub(super) fn voice_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         }
     }
     sounds_and_shortcuts(app, ui);
+    ui.collapsing("Processamento e diagnóstico avançados", |ui| {
+        voice_processing(app, ui)
+    });
     if app.audio.is_some() {
         ui.ctx().request_repaint_after(Duration::from_millis(50));
+    }
+}
+
+fn voice_processing(app: &mut LanvoxApp, ui: &mut egui::Ui) {
+    let mut changed = ui
+        .checkbox(&mut app.settings.echo_cancellation, "Cancelamento de eco")
+        .changed();
+    changed |= ui
+        .checkbox(&mut app.settings.noise_suppression, "Supressão de ruído")
+        .changed();
+    if app.settings.noise_suppression {
+        changed |= ui
+            .checkbox(
+                &mut app.settings.rnnoise,
+                "Usar RNNoise (rede neural, mais forte)",
+            )
+            .changed();
+    }
+    if changed {
+        app.audio_shared.processor.set_rnnoise(app.settings.rnnoise);
+        app.audio_shared.processor.configure(
+            app.settings.echo_cancellation,
+            app.settings.noise_suppression,
+        );
+    }
+    ui.collapsing("Ajuste avançado de eco", |ui| {
+        if ui
+            .add(
+                egui::Slider::new(&mut app.settings.echo_delay_ms, 0..=500)
+                    .suffix(" ms")
+                    .text("Atraso do dispositivo"),
+            )
+            .changed()
+        {
+            app.audio_shared
+                .processor
+                .set_delay_ms(app.settings.echo_delay_ms);
+        }
+    });
+    if let Some(client) = &app.client {
+        let stats = client.media_stats();
+        ui.label(if stats.active {
+            "Mídia por UDP cifrado: ativa"
+        } else {
+            "Mídia por UDP: aguardando rota"
+        });
+        ui.label(format!(
+            "Enviado {:.1} MiB · recebido {:.1} MiB · descartes {} · fila {} KiB",
+            stats.sent_bytes as f64 / 1048576.0,
+            stats.received_bytes as f64 / 1048576.0,
+            stats.dropped,
+            stats.queued_bytes / 1024
+        ));
+        let people: Vec<_> = app
+            .view
+            .as_ref()
+            .map(|v| v.users.values().map(|u| (u.id, u.name.clone())).collect())
+            .unwrap_or_default();
+        for (id, name) in people {
+            if let Some(stats) = app.mixer.voice_stats(id) {
+                ui.label(format!(
+                    "{name}: jitter {:.1}ms · buffer {}ms · perdas {} · atrasados {}",
+                    stats.jitter_ms, stats.target_ms, stats.lost, stats.late
+                ));
+            }
+        }
     }
 }
 
@@ -449,7 +455,7 @@ fn h264_codec_section(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         )
         .changed()
     {
-        app.settings.save();
+        app.save_preferences();
         codec::configure(app.settings.h264_codec);
     }
     ui.label(RichText::new(codec::ATTRIBUTION).strong());
@@ -496,7 +502,7 @@ fn link_preview_section(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         )
         .changed()
     {
-        app.settings.save();
+        app.save_preferences();
     }
     ui.label(
         RichText::new(
@@ -508,8 +514,6 @@ fn link_preview_section(app: &mut LanvoxApp, ui: &mut egui::Ui) {
 }
 
 pub(super) fn video_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
-    link_preview_section(app, ui);
-    h264_codec_section(app, ui);
     let ctx = ui.ctx().clone();
     let needs = app
         .device_cache
@@ -533,6 +537,10 @@ pub(super) fn video_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         ui.label(
             RichText::new("Nenhuma câmera encontrada.").color(theme::color(theme::TEXT_MUTED)),
         );
+        ui.collapsing("Vídeo e privacidade avançados", |ui| {
+            link_preview_section(app, ui);
+            h264_codec_section(app, ui);
+        });
         return;
     }
     let current = cams
@@ -552,6 +560,7 @@ pub(super) fn video_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         app.restart_camera(&ctx);
     }
     ui.add_space(12.0);
+    let previous_quality = app.settings.camera;
     components::form_row(ui, "Qualidade da câmera", |ui| {
         egui::ComboBox::from_id_salt("camera-resolution")
             .selected_text(app.settings.camera.resolution.label())
@@ -569,12 +578,12 @@ pub(super) fn video_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             ui.selectable_value(&mut app.settings.camera.fps, 30, "30 fps");
         });
         ui.checkbox(&mut app.settings.camera.mirror, "Espelhar minha prévia");
-        if ui.button("Aplicar qualidade").clicked() {
-            app.settings.camera = app.settings.camera.normalized();
-            app.settings.save();
-            app.restart_camera(&ctx);
-        }
     });
+    if app.settings.camera != previous_quality {
+        app.settings.camera = app.settings.camera.normalized();
+        app.save_preferences();
+        app.restart_camera(&ctx);
+    }
     if let Some(camera) = app.camera.as_ref().or(app.camera_preview.as_ref()) {
         let stats = camera.stats.lock();
         ui.label(
@@ -639,4 +648,8 @@ pub(super) fn video_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             }
         }
     }
+    ui.collapsing("Vídeo e privacidade avançados", |ui| {
+        link_preview_section(app, ui);
+        h264_codec_section(app, ui);
+    });
 }

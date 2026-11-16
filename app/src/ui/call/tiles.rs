@@ -346,7 +346,7 @@ pub fn stream_audio_controls(app: &mut LanvoxApp, ui: &mut egui::Ui, id: UserId,
         app.set_stream_audio(id, name, vol, muted);
     }
     if ui.input(|i| i.pointer.any_released()) {
-        app.settings.save();
+        app.save_preferences();
     }
 }
 
@@ -372,7 +372,7 @@ pub fn person_audio_controls(app: &mut LanvoxApp, ui: &mut egui::Ui, id: UserId,
         app.set_person_audio(id, name, vol, muted);
     }
     if ui.input(|i| i.pointer.any_released()) {
-        app.settings.save();
+        app.save_preferences();
     }
 }
 
@@ -436,9 +436,9 @@ pub(super) fn stream_tile(
             btn,
             4.0,
             if hover {
-                theme::ACCENT.gamma_multiply(1.15)
+                theme::ACTION_FILL.gamma_multiply(1.1)
             } else {
-                theme::ACCENT
+                theme::ACTION_FILL
             },
         );
         painter.text(
@@ -449,12 +449,12 @@ pub(super) fn stream_tile(
             Color32::WHITE,
         );
     }
-    let live = Rect::from_min_size(rect.left_top() + vec2(8.0, 8.0), vec2(36.0, 18.0));
+    let live = Rect::from_min_size(rect.left_top() + vec2(8.0, 8.0), vec2(58.0, 18.0));
     painter.rect_filled(live, 4.0, theme::RED);
     painter.text(
         live.center(),
         Align2::CENTER_CENTER,
-        "LIVE",
+        "AO VIVO",
         FontId::proportional(11.0),
         Color32::WHITE,
     );

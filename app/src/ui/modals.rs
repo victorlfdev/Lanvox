@@ -10,8 +10,6 @@ use egui::{
     Stroke,
 };
 
-use super::icons::Icon;
-
 use super::{theme, widgets};
 
 use crate::app::{LanvoxApp, Modal, SettingsTab};
@@ -58,7 +56,7 @@ fn pill(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
             .layout_no_wrap(text.to_string(), FontId::proportional(13.0), Color32::WHITE);
     let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 24.0, 30.0), Sense::click());
     let bg = if on {
-        theme::color(theme::ACCENT)
+        theme::color(theme::ACTION_FILL)
     } else if resp.hovered() {
         theme::color(theme::SELECTED)
     } else {
@@ -67,6 +65,15 @@ fn pill(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
     ui.painter().rect_filled(rect, 15.0, bg);
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), on, text));
+    if resp.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            15,
+            Stroke::new(2.0, theme::TEXT_BRIGHT),
+            egui::StrokeKind::Outside,
+        );
+    }
     resp
 }
 
@@ -355,7 +362,10 @@ pub fn notice(app: &mut LanvoxApp, ctx: &egui::Context) {
         return;
     };
     if at.elapsed() > Duration::from_secs(6) {
-        app.notice = None;
+        app.notice = app
+            .notice_queue
+            .pop_front()
+            .map(|text| (text, std::time::Instant::now()));
         return;
     }
     ctx.request_repaint_after(Duration::from_millis(250));

@@ -1,6 +1,6 @@
 //! Durable conversations, bounded cache, rich interactions and virtualized rows.
 
-use super::avatar::{Avatar, AvatarSize, PresenceState};
+use super::avatar::{Avatar, AvatarSize};
 
 use super::{icons::Icon, theme, widgets};
 

@@ -175,7 +175,7 @@ impl LanvoxApp {
                     if !favorite.is_empty() && !self.settings.favorites.contains(&favorite) {
                         self.settings.favorites.push(favorite);
                     }
-                    self.settings.save();
+                    self.save_preferences();
                     *self.audio_shared.sender.lock() = Some(client.sender());
                     self.client = Some(client);
                     self.host_error = None;
@@ -220,6 +220,7 @@ impl LanvoxApp {
     }
 
     pub(super) fn connection_lost(&mut self, reason: String) {
+        self.preserve_voice_note();
         self.stop_media();
         *self.audio_shared.sender.lock() = None;
         self.client = None;
@@ -240,6 +241,7 @@ impl LanvoxApp {
     }
 
     pub fn disconnect(&mut self) {
+        self.preserve_voice_note();
         self.save_drafts();
         self.cancel_connection();
         self.leave_voice();
@@ -327,7 +329,7 @@ impl LanvoxApp {
             name
         };
         self.settings.host_name = name.clone();
-        self.settings.save();
+        self.save_preferences();
         // The owner authenticates with the key this device uses for this exact host address,
         // which is the rotated key after a rotation (not the stale base identity).
         let owner_address = crate::settings::host_address(&format!(
@@ -403,7 +405,7 @@ impl LanvoxApp {
                 self.settings.drafts.insert(key, text.clone());
             }
         }
-        self.settings.save();
+        self.save_preferences();
         self.draft_saved_at = Instant::now();
     }
 

@@ -151,7 +151,7 @@ pub fn show(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                             app.workspace_ui.group_open = true;
                         }
                         if tab <= 1 && ui.button("Convites e comunidade").clicked() {
-                            app.workspace_ui.managing = true;
+                            app.open_guild_settings(app.guild, 0);
                         }
                     }); }
                     ui.add_space(12.0);

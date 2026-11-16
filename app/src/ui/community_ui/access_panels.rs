@@ -90,7 +90,10 @@ pub fn roles(app: &mut LanvoxApp, ui: &mut Ui, guild: GuildId) {
             if ui
                 .selectable_label(
                     app.workspace_ui.extras.role.id == role.id,
-                    RichText::new(&role.name).color(color32(role.color)),
+                    RichText::new(&role.name).color(theme::readable_text(
+                        color32(role.color),
+                        theme::color(theme::CHAT),
+                    )),
                 )
                 .clicked()
             {
@@ -98,6 +101,10 @@ pub fn roles(app: &mut LanvoxApp, ui: &mut Ui, guild: GuildId) {
             }
         }
     });
+    if app.workspace_ui.extras.role.id == 0 && app.workspace_ui.extras.role.guild != guild {
+        ui.label("Selecione um cargo para editar ou escolha Novo cargo.");
+        return;
+    }
     let mut role = app.workspace_ui.extras.role.clone();
     if role.id == 0 && role.position == 0 {
         role.position = 1;
@@ -146,7 +153,7 @@ pub fn roles(app: &mut LanvoxApp, ui: &mut Ui, guild: GuildId) {
         if ui
             .add_enabled(
                 !role.name.trim().is_empty(),
-                egui::Button::new("Salvar cargo").fill(theme::color(theme::ACCENT)),
+                egui::Button::new("Salvar cargo").fill(theme::color(theme::ACTION_FILL)),
             )
             .clicked()
         {
@@ -317,7 +324,10 @@ pub fn members(app: &mut LanvoxApp, ui: &mut Ui, guild: GuildId) {
                     if ui
                         .checkbox(
                             &mut selected,
-                            RichText::new(&role.name).color(color32(role.color)),
+                            RichText::new(&role.name).color(theme::readable_text(
+                                color32(role.color),
+                                theme::color(theme::CHAT),
+                            )),
                         )
                         .changed()
                     {

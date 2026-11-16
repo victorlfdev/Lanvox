@@ -11,7 +11,7 @@ use super::{theme, widgets};
 /// Smallest body height we allow (the interface is designed to fit 940x500).
 const MIN_BODY_H: f32 = 120.0;
 /// Vertical space the modal chrome (margins, title, footer, window padding) needs.
-const CHROME_H: f32 = 165.0;
+const CHROME_H: f32 = 220.0;
 
 /// Width for a modal: the preferred width, shrunk to fit narrow windows.
 pub fn modal_width(ctx: &egui::Context, preferred: f32) -> f32 {
@@ -36,7 +36,7 @@ pub fn modal_frame() -> Frame {
 pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
     ui.add(
         egui::Button::new(RichText::new(text).color(Color32::WHITE).strong())
-            .fill(theme::color(theme::ACCENT))
+            .fill(theme::color(theme::ACTION_FILL))
             .corner_radius(4)
             .min_size(vec2(96.0, 34.0)),
     )
@@ -63,6 +63,43 @@ pub fn secondary_button(ui: &mut Ui, text: &str) -> Response {
 }
 
 // ---------------------------------------------------------------- forms
+
+pub fn avatar_color_picker(ui: &mut Ui, value: &mut u32) {
+    ui.label("Cor do avatar");
+    ui.horizontal_wrapped(|ui| {
+        for (color, name) in crate::model::AVATAR_COLORS.into_iter().zip([
+            "Azul", "Verde", "Amarelo", "Vermelho", "Rosa", "Turquesa", "Roxo", "Cinza",
+        ]) {
+            let selected = *value == color;
+            let response = ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(if selected { "✓" } else { " " })
+                            .color(theme::on_color(crate::model::color32(color))),
+                    )
+                    .fill(crate::model::color32(color))
+                    .stroke(if selected {
+                        egui::Stroke::new(2.0, theme::TEXT_BRIGHT)
+                    } else {
+                        egui::Stroke::NONE
+                    })
+                    .min_size(vec2(30.0, 30.0)),
+                )
+                .on_hover_text(name);
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::Role::Button,
+                    ui.is_enabled(),
+                    selected,
+                    format!("Cor {name}"),
+                )
+            });
+            if response.clicked() {
+                *value = color;
+            }
+        }
+    });
+}
 
 /// A label above a control.
 pub fn form_row<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
@@ -172,12 +209,17 @@ pub fn modal(
         .show(ctx, |ui| {
             ui.set_width(width);
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(title)
-                        .size(20.0)
-                        .strong()
-                        .color(theme::color(theme::TEXT_BRIGHT)),
-                );
+                ui.add_sized(
+                    [width - 40.0, 26.0],
+                    egui::Label::new(
+                        RichText::new(title)
+                            .size(20.0)
+                            .strong()
+                            .color(theme::color(theme::TEXT_BRIGHT)),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(title);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if widgets::icon_button(
                         ui,
@@ -209,24 +251,28 @@ pub fn modal(
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(4.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if let Some(label) = opts.primary {
-                        let clicked = ui
-                            .add_enabled_ui(opts.primary_enabled, |ui| {
-                                if opts.primary_danger {
-                                    danger_button(ui, label)
-                                } else {
-                                    primary_button(ui, label)
-                                }
-                            })
-                            .inner
-                            .clicked();
-                        result.primary |= clicked;
-                    }
-                    if let Some(label) = opts.secondary {
-                        result.secondary |= secondary_button(ui, label).clicked();
-                    }
-                });
+                ui.allocate_ui_with_layout(
+                    vec2(width, 34.0),
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        if let Some(label) = opts.primary {
+                            let clicked = ui
+                                .add_enabled_ui(opts.primary_enabled, |ui| {
+                                    if opts.primary_danger {
+                                        danger_button(ui, label)
+                                    } else {
+                                        primary_button(ui, label)
+                                    }
+                                })
+                                .inner
+                                .clicked();
+                            result.primary |= clicked;
+                        }
+                        if let Some(label) = opts.secondary {
+                            result.secondary |= secondary_button(ui, label).clicked();
+                        }
+                    },
+                );
             }
         });
     result.dismissed |= response.should_close();
@@ -235,33 +281,9 @@ pub fn modal(
 
 // ---------------------------------------------------------------- profile
 
-/// Round avatar with the initials of the name, used when no image is available.
-pub fn initials_avatar(ui: &mut Ui, size: f32, name: &str) {
-    let initials: String = name
-        .split_whitespace()
-        .filter_map(|w| w.chars().next())
-        .take(2)
-        .flat_map(|c| c.to_uppercase())
-        .collect();
-    let (rect, _) = ui.allocate_exact_size(vec2(size, size), egui::Sense::hover());
-    ui.painter()
-        .circle_filled(rect.center(), size / 2.0, theme::color(theme::ACCENT));
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        if initials.is_empty() {
-            "?".to_string()
-        } else {
-            initials
-        },
-        egui::FontId::proportional(size * 0.4),
-        Color32::WHITE,
-    );
-}
-
 /// Profile card: header (avatar, name, optional subtitle) and biography.
 /// `avatar` is the extension point for the avatar painter; pass
-/// `|ui| initials_avatar(ui, 80.0, name)` for the fallback.
+/// Draw the avatar through the shared Avatar component.
 pub fn profile_card(
     ui: &mut Ui,
     name: &str,
@@ -296,4 +318,39 @@ pub fn profile_card(
             }
         });
     ui.add_space(8.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modal_title_and_footer_fit_the_minimum_window_at_maximum_scale() {
+        // The last size is 940×500 at 140% in logical points.
+        for size in [
+            vec2(1280.0, 720.0),
+            vec2(940.0, 500.0),
+            vec2(940.0 / 1.4, 500.0 / 1.4),
+        ] {
+            let ctx = egui::Context::default();
+            theme::apply(&ctx);
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            for _ in 0..5 {
+                let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                    modal(ui.ctx(), "geometry-regression", "Preferências e configurações da comunidade",
+                        ModalOptions::new(860.0).subtitle("As alterações são preservadas ao fechar. Esta explicação pode ocupar mais de uma linha.")
+                            .primary("Salvar alterações").secondary("Cancelar"),
+                        |ui| { for _ in 0..100 { ui.label("Conteúdo rolável do formulário"); } });
+                });
+                output.textures_delta.clear();
+            }
+            let rect = egui::AreaState::load(&ctx, egui::Id::unique("geometry-regression"))
+                .unwrap()
+                .rect();
+            assert!(
+                screen.contains_rect(rect),
+                "Dialog {rect:?} escapes screen {screen:?}"
+            );
+        }
+    }
 }

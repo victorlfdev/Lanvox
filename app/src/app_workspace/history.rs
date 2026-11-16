@@ -37,6 +37,15 @@ impl LanvoxApp {
     }
 
     pub fn select_channel(&mut self, channel: ChannelId) {
+        if self.selected != Some(channel) {
+            self.preserve_voice_note();
+        }
+        if let Some(ch) = self.view.as_ref().and_then(|v| v.channel(channel)) {
+            self.home = ch.guild == 0;
+            if ch.guild != 0 {
+                self.guild = Some(ch.guild);
+            }
+        }
         self.selected = Some(channel);
         let scope = format!("{}|{}|{channel}", self.local_identity, self.current_host());
         let position = self
@@ -62,6 +71,7 @@ impl LanvoxApp {
         self.workspace_ui.history_anchor = position;
         self.workspace_ui.reply_to = None;
         self.workspace_ui.pinned_only = false;
+        self.workspace_ui.editing = None;
         if let Some(view) = &self.view {
             let cursor = view
                 .workspace
@@ -99,6 +109,37 @@ impl LanvoxApp {
             if view.messages.get(&channel).is_none_or(Vec::is_empty) {
                 self.load_history(channel, false);
             }
+        }
+    }
+
+    pub fn show_friends(&mut self) {
+        self.preserve_voice_note();
+        self.home = true;
+        self.selected = None;
+        self.workspace_ui.reply_to = None;
+        self.workspace_ui.editing = None;
+        self.workspace_ui.pinned_only = false;
+    }
+
+    pub fn open_guild_settings(&mut self, guild: Option<GuildId>, tab: u8) {
+        self.workspace_ui.management_guild = guild;
+        self.workspace_ui.management_conversation = None;
+        self.workspace_ui.delete_guild_confirm = None;
+        self.workspace_ui.delete_channel_confirm = false;
+        self.workspace_ui.managing = true;
+        self.workspace_ui.extras.admin_tab = tab;
+    }
+
+    pub fn open_selected_settings(&mut self) {
+        let channel = self
+            .selected
+            .and_then(|id| self.view.as_ref()?.channel(id))
+            .cloned();
+        if let Some(channel) = channel.filter(|ch| ch.guild == 0) {
+            self.open_guild_settings(None, 0);
+            self.workspace_ui.management_conversation = Some(channel.id);
+        } else {
+            self.open_guild_settings(self.guild, 0);
         }
     }
 
@@ -282,7 +323,7 @@ impl LanvoxApp {
                 p.clone()
             });
         if let Some(pending) = pending {
-            self.settings.save();
+            self.save_preferences();
             self.send_pending(&pending);
         }
     }
@@ -346,7 +387,7 @@ impl LanvoxApp {
             }
         }
         if changed {
-            self.settings.save();
+            self.save_preferences();
         }
         let mut expired = Vec::new();
         for call in self.ringing() {
