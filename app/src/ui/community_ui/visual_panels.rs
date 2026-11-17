@@ -105,14 +105,12 @@ pub fn poll_visual(app: &mut LanvoxApp) {
     app.workspace_ui.extras.visual_pending = None;
     match result {
         Ok(Some((guild, banner, image))) => {
-            app.workspace_ui.extras.visual_editor = Some(VisualEditor {
-                guild,
-                banner,
-                image,
-                texture: None,
-                zoom: 1.0,
-                center: (0.5, 0.5),
-            });
+            let target = if banner {
+                VisualTarget::Banner(guild)
+            } else {
+                VisualTarget::Icon(guild)
+            };
+            app.workspace_ui.extras.visual_editor = Some(VisualEditor::new(target, image));
         }
         Ok(None) => {}
         Err(error) => app.notify(error),
@@ -346,9 +344,16 @@ pub fn image_texture(
 }
 
 /// Crop/position editor shown after the person picks a community image.
+#[derive(Clone, Copy)]
+pub enum VisualTarget {
+    Banner(GuildId),
+    Icon(GuildId),
+    /// The signed-in user's own profile picture.
+    Avatar,
+}
+
 pub struct VisualEditor {
-    guild: GuildId,
-    banner: bool,
+    target: VisualTarget,
     image: image::DynamicImage,
     texture: Option<egui::TextureHandle>,
     /// 1.0 shows the largest crop that fits; larger values zoom in.
@@ -358,8 +363,22 @@ pub struct VisualEditor {
 }
 
 impl VisualEditor {
+    pub fn new(target: VisualTarget, image: image::DynamicImage) -> Self {
+        Self {
+            target,
+            image,
+            texture: None,
+            zoom: 1.0,
+            center: (0.5, 0.5),
+        }
+    }
+
+    fn banner(&self) -> bool {
+        matches!(self.target, VisualTarget::Banner(_))
+    }
+
     fn aspect(&self) -> f32 {
-        if self.banner {
+        if self.banner() {
             1000.0 / 375.0
         } else {
             1.0
@@ -383,7 +402,11 @@ impl VisualEditor {
 
     fn encode(&self) -> Result<Vec<u8>, String> {
         let (x, y, w, h) = self.crop();
-        let (ow, oh) = if self.banner { (1000, 375) } else { (128, 128) };
+        let (ow, oh) = match self.target {
+            VisualTarget::Banner(_) => (1000, 375),
+            VisualTarget::Icon(_) => (128, 128),
+            VisualTarget::Avatar => (256, 256),
+        };
         let out = self
             .image
             .crop_imm(x as u32, y as u32, (w as u32).max(1), (h as u32).max(1))
@@ -391,7 +414,7 @@ impl VisualEditor {
         let mut bytes = std::io::Cursor::new(Vec::new());
         out.write_to(&mut bytes, image::ImageFormat::Png)
             .map_err(|e| e.to_string())?;
-        let limit = if self.banner { 512 * 1024 } else { 256 * 1024 };
+        let limit = if self.banner() { 512 * 1024 } else { 256 * 1024 };
         if bytes.get_ref().len() > limit {
             return Err("A imagem convertida ainda é muito grande. Escolha outra imagem.".into());
         }
@@ -414,10 +437,10 @@ pub fn visual_editor(app: &mut LanvoxApp, ctx: &egui::Context) {
             egui::TextureOptions::LINEAR,
         ));
     }
-    let title = if editor.banner {
-        "Ajustar banner"
-    } else {
-        "Ajustar ícone"
+    let title = match editor.target {
+        VisualTarget::Banner(_) => "Ajustar banner",
+        VisualTarget::Icon(_) => "Ajustar ícone",
+        VisualTarget::Avatar => "Ajustar foto de perfil",
     };
     let width = components::modal_width(ctx, 460.0);
     let result = components::modal(
@@ -452,7 +475,11 @@ pub fn visual_editor(app: &mut LanvoxApp, ctx: &egui::Context) {
                 egui::pos2(x / iw, y / ih),
                 egui::pos2((x + w) / iw, (y + h) / ih),
             );
-            let radius: u8 = if editor.banner { 6 } else { 18 };
+            let radius: u8 = match editor.target {
+                VisualTarget::Banner(_) => 6,
+                VisualTarget::Icon(_) => 18,
+                VisualTarget::Avatar => 128,
+            };
             if let Some(t) = &editor.texture {
                 ui.painter().add(
                     egui::epaint::RectShape::filled(rect, radius, egui::Color32::WHITE)
@@ -472,30 +499,32 @@ pub fn visual_editor(app: &mut LanvoxApp, ctx: &egui::Context) {
     );
     if result.primary {
         match editor.encode() {
-            Ok(bytes) => {
-                let guild = editor.guild;
-                let banner = editor.banner;
-                let visual = app
-                    .view
-                    .as_ref()
-                    .and_then(|v| {
-                        v.workspace
-                            .community
-                            .visuals
-                            .iter()
-                            .find(|v| v.guild == guild)
-                    })
-                    .cloned()
-                    .unwrap_or_default();
-                command(
-                    app,
-                    CommunityCommand::UpdateVisual {
-                        guild,
-                        icon: if banner { visual.icon } else { bytes.clone() },
-                        banner: if banner { bytes } else { visual.banner },
-                    },
-                );
-            }
+            Ok(bytes) => match editor.target {
+                VisualTarget::Avatar => app.workspace_ui.profile_avatar = bytes,
+                VisualTarget::Banner(guild) | VisualTarget::Icon(guild) => {
+                    let banner = editor.banner();
+                    let visual = app
+                        .view
+                        .as_ref()
+                        .and_then(|v| {
+                            v.workspace
+                                .community
+                                .visuals
+                                .iter()
+                                .find(|v| v.guild == guild)
+                        })
+                        .cloned()
+                        .unwrap_or_default();
+                    command(
+                        app,
+                        CommunityCommand::UpdateVisual {
+                            guild,
+                            icon: if banner { visual.icon } else { bytes.clone() },
+                            banner: if banner { bytes } else { visual.banner },
+                        },
+                    );
+                }
+            },
             Err(error) => {
                 app.notify(error);
                 app.workspace_ui.extras.visual_editor = Some(editor);

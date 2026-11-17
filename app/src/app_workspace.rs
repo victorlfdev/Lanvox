@@ -183,7 +183,8 @@ pub enum FileTask {
         name: String,
         bytes: Vec<u8>,
     },
-    Avatar(Vec<u8>),
+    /// Decoded avatar candidate, opened in the crop editor.
+    Avatar(image::DynamicImage),
     /// Where the user wants a large attachment saved; it is then streamed straight there.
     SaveTarget {
         info: AttachmentInfo,

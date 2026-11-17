@@ -11,7 +11,7 @@ impl LanvoxApp {
             let task = rfd::FileDialog::new()
                 .add_filter("Imagem PNG/JPEG", &["png", "jpg", "jpeg"])
                 .pick_file()
-                .map(|path| -> Result<Vec<u8>, String> {
+                .map(|path| -> Result<image::DynamicImage, String> {
                     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
                     if bytes.len() > 2 * 1024 * 1024 {
                         return Err("O avatar precisa ter até 2 MiB.".into());
@@ -24,15 +24,13 @@ impl LanvoxApp {
                     limits.max_image_height = Some(4096);
                     limits.max_alloc = Some(64 * 1024 * 1024);
                     reader.limits(limits);
-                    let image = reader
-                        .decode()
-                        .map_err(|e| e.to_string())?
-                        .thumbnail(256, 256);
-                    let mut out = std::io::Cursor::new(Vec::new());
-                    image
-                        .write_to(&mut out, image::ImageFormat::Png)
-                        .map_err(|e| e.to_string())?;
-                    Ok(out.into_inner())
+                    let image = reader.decode().map_err(|e| e.to_string())?;
+                    // Keep the editor responsive on very large photos.
+                    Ok(if image.width().max(image.height()) > 1600 {
+                        image.thumbnail(1600, 1600)
+                    } else {
+                        image
+                    })
                 })
                 .map(|result| match result {
                     Ok(bytes) => FileTask::Avatar(bytes),

@@ -208,7 +208,13 @@ impl LanvoxApp {
                 } => {
                     self.stage_attachment(channel, name, bytes);
                 }
-                FileTask::Avatar(bytes) => self.workspace_ui.profile_avatar = bytes,
+                FileTask::Avatar(image) => {
+                    self.workspace_ui.extras.visual_editor =
+                        Some(crate::ui::community_ui::VisualEditor::new(
+                            crate::ui::community_ui::VisualTarget::Avatar,
+                            image,
+                        ));
+                }
                 FileTask::SaveTarget { info, path } => self.begin_streamed_save(info, path),
                 FileTask::Error(error) => self.notify_error(error),
                 FileTask::Saved(message) => self.notify(message),
