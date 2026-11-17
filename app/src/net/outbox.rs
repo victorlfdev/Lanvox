@@ -38,6 +38,26 @@ pub struct Outbox {
     socket: Arc<TcpStream>,
     media: Arc<Mutex<Option<super::datagram::MediaSender>>>,
     camera_keyframe: Arc<AtomicBool>,
+    #[cfg(feature = "gui")]
+    video_control: Arc<Mutex<[VideoControl; 2]>>,
+}
+
+#[cfg(feature = "gui")]
+#[derive(Clone, Copy, Default)]
+pub struct VideoControl {
+    pub max_bps: u32,
+    pub congested: bool,
+    pub healthy: bool,
+    pub overcommitted: bool,
+    pub received: Option<std::time::Instant>,
+}
+
+#[cfg(feature = "gui")]
+fn video_index(kind: crate::model::StreamKind) -> usize {
+    match kind {
+        crate::model::StreamKind::Screen => 0,
+        crate::model::StreamKind::Camera => 1,
+    }
 }
 
 impl Outbox {
@@ -61,6 +81,8 @@ impl Outbox {
             socket: Arc::new(socket),
             media: Arc::new(Mutex::new(None)),
             camera_keyframe: Arc::new(AtomicBool::new(true)),
+            #[cfg(feature = "gui")]
+            video_control: Arc::new(Mutex::new([VideoControl::default(); 2])),
         };
         let me = outbox.clone();
         std::thread::Builder::new()
@@ -266,6 +288,41 @@ impl Outbox {
     }
     pub fn take_camera_keyframe(&self) -> bool {
         self.camera_keyframe.swap(false, Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "gui")]
+    pub fn update_video_control(
+        &self,
+        kind: crate::model::StreamKind,
+        max_bps: u32,
+        congested: bool,
+        healthy: bool,
+        overcommitted: bool,
+    ) {
+        let mut controls = self.video_control.lock();
+        let current = &mut controls[video_index(kind)];
+        *current = VideoControl {
+            max_bps,
+            congested: current.congested || congested,
+            healthy,
+            overcommitted,
+            received: Some(std::time::Instant::now()),
+        };
+    }
+
+    #[cfg(feature = "gui")]
+    pub fn video_control(&self, kind: crate::model::StreamKind) -> VideoControl {
+        let mut controls = self.video_control.lock();
+        let current = &mut controls[video_index(kind)];
+        let mut result = *current;
+        current.congested = false;
+        if result
+            .received
+            .is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(3))
+        {
+            result.healthy = false;
+        }
+        result
     }
 }
 

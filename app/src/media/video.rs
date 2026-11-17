@@ -266,6 +266,11 @@ fn request_recovery(
     {
         pending.insert(key, Instant::now());
         sender.request_keyframe(key.0, key.1);
+        sender.send(&crate::protocol::ClientMsg::VideoFeedback {
+            owner: key.0,
+            kind: key.1,
+            congested: true,
+        });
     }
 }
 
@@ -284,10 +289,12 @@ impl Decoder {
                 let mut temporal =
                     HashMap::<StreamKey, (super::temporal::TemporalDecoder, usize)>::new();
                 let mut current_generation = 0;
+                let mut feedback_sent = HashMap::<StreamKey, Instant>::new();
                 loop {
                     let latest = decoder_generation.load(Ordering::Relaxed);
                     if latest != current_generation {
                         temporal.clear();
+                        feedback_sent.clear();
                         requests.lock().clear();
                         current_generation = latest;
                     }
@@ -298,6 +305,7 @@ impl Decoder {
                     };
                     if matches!(job.frame, DecodeFrame::Forget) {
                         temporal.remove(&job.key);
+                        feedback_sent.remove(&job.key);
                         requests.lock().remove(&job.key);
                         continue;
                     }
@@ -309,13 +317,17 @@ impl Decoder {
                         request_recovery(&requests, job.key, &job.sender);
                         continue;
                     }
+                    let mut decoded = false;
                     match job.frame {
                         DecodeFrame::Tiles(frame) => {
                             temporal.remove(&job.key);
                             if !store.apply_if_active(job.key, &frame, || !job.sender.is_closed()) {
                                 request_recovery(&requests, job.key, &job.sender);
-                            } else if frame.keyframe {
-                                requests.lock().remove(&job.key);
+                            } else {
+                                decoded = true;
+                                if frame.keyframe {
+                                    requests.lock().remove(&job.key);
+                                }
                             }
                         }
                         DecodeFrame::H264(frame) => {
@@ -356,6 +368,7 @@ impl Decoder {
                                 *stored_budget = budget;
                                 match decoder.decode(&frame) {
                                     Ok(Some(pixels)) if !job.sender.is_closed() => {
+                                        decoded = true;
                                         store.put(
                                             job.key,
                                             frame.width,
@@ -375,6 +388,18 @@ impl Decoder {
                             }
                         }
                         DecodeFrame::Forget => {}
+                    }
+                    if decoded
+                        && feedback_sent
+                            .get(&job.key)
+                            .is_none_or(|at| at.elapsed() >= Duration::from_secs(1))
+                    {
+                        job.sender.send(&crate::protocol::ClientMsg::VideoFeedback {
+                            owner: job.key.0,
+                            kind: job.key.1,
+                            congested: job.queued.elapsed() > Duration::from_millis(150),
+                        });
+                        feedback_sent.insert(job.key, Instant::now());
                     }
                     ctx.request_repaint();
                 }
@@ -575,6 +600,14 @@ mod tests {
             ClientMsg::RequestKeyframe {
                 owner: 7,
                 kind: StreamKind::Screen
+            }
+        ));
+        assert!(matches!(
+            read_packet::<_, ClientMsg>(&mut peer).unwrap(),
+            ClientMsg::VideoFeedback {
+                owner: 7,
+                kind: StreamKind::Screen,
+                congested: true
             }
         ));
         outbox.close();

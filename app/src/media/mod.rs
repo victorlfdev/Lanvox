@@ -2,6 +2,7 @@
 
 #[cfg(feature = "gui")]
 pub mod audio;
+pub mod bitrate;
 #[cfg(feature = "gui")]
 pub mod camera;
 pub mod codec;

@@ -627,7 +627,7 @@ impl ServerView {
             ServerMsg::Viewers { kind, count } => {
                 self.viewers.insert(kind, count);
             }
-            ServerMsg::Pong(_) => {}
+            ServerMsg::Pong(_) | ServerMsg::VideoControl { .. } => {}
             ServerMsg::Error(e) => return Some(e),
         }
         None

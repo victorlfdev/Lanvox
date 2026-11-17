@@ -12,7 +12,7 @@ use crate::model::*;
 pub const DEFAULT_PORT: u16 = 47800;
 pub const DISCOVERY_PORT: u16 = 47801;
 // Kept from the previous name on purpose; see branding.rs.
-pub const DISCOVERY_MAGIC: &str = "HUDDLE6";
+pub const DISCOVERY_MAGIC: &str = "HUDDLE7";
 /// Largest packet accepted, to guard against garbage on the socket.
 pub const MAX_PACKET: usize = 32 * 1024 * 1024;
 pub const MAX_VIDEO_SIDE: u32 = 8192;
@@ -260,6 +260,12 @@ pub enum ClientMsg {
     },
     Ping(u64),
     Workspace(WorkspaceCommand),
+    /// Receiver health, at most twice per second per active remote stream.
+    VideoFeedback {
+        owner: UserId,
+        kind: StreamKind,
+        congested: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -347,6 +353,13 @@ pub enum ServerMsg {
         nonce: [u8; 32],
     },
     Workspace(WorkspaceEvent),
+    VideoControl {
+        kind: StreamKind,
+        max_bps: u32,
+        congested: bool,
+        healthy: bool,
+        overcommitted: bool,
+    },
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

@@ -8,7 +8,7 @@ use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 #[cfg(any(feature = "gui", test))]
 pub mod local;
 pub mod transport;
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 fn crypto_error() -> io::Error {
     io::Error::other("Could not initialize the local identity")

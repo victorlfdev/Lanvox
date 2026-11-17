@@ -328,6 +328,21 @@ impl Client {
                                     tx.send(NetEvent::Server(ServerMsg::Viewers { kind, count }));
                                 ctx.request_repaint();
                             }
+                            ServerMsg::VideoControl {
+                                kind,
+                                max_bps,
+                                congested,
+                                healthy,
+                                overcommitted,
+                            } => {
+                                outbox.update_video_control(
+                                    kind,
+                                    max_bps,
+                                    congested,
+                                    healthy,
+                                    overcommitted,
+                                );
+                            }
                             ServerMsg::Pong(t) => {
                                 *last_pong
                                     .lock()
@@ -462,6 +477,9 @@ impl ClientSender {
     }
     pub fn take_camera_keyframe(&self) -> bool {
         self.outbox.take_camera_keyframe()
+    }
+    pub fn video_control(&self, kind: StreamKind) -> super::outbox::VideoControl {
+        self.outbox.video_control(kind)
     }
     pub fn request_keyframe(&self, owner: UserId, kind: StreamKind) {
         self.send(&ClientMsg::RequestKeyframe { owner, kind });

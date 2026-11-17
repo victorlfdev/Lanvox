@@ -4,9 +4,23 @@
 use super::*;
 use parking_lot::RwLock;
 
-#[derive(Default)]
 pub(super) struct MediaRouter {
     routes: RwLock<HashMap<UserId, Route>>,
+    video_bps: u64,
+}
+
+impl Default for MediaRouter {
+    fn default() -> Self {
+        let video_bps = crate::branding::env_var("LANVOX_VIDEO_BUDGET_MBPS")
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| (1..=100_000).contains(v))
+            .map(|v| v * 1_000_000)
+            .unwrap_or(crate::media::bitrate::DEFAULT_HOST_VIDEO_BPS);
+        Self {
+            routes: RwLock::new(HashMap::new()),
+            video_bps,
+        }
+    }
 }
 
 struct Route {
@@ -20,6 +34,9 @@ struct Route {
     camera_active: bool,
     last_keyframe: Mutex<HashMap<StreamKind, Instant>>,
     budget: Arc<Mutex<Budget>>,
+    viewers: HashMap<StreamKind, HashSet<UserId>>,
+    limits: HashMap<StreamKind, u32>,
+    overcommitted: bool,
 }
 
 struct Bucket {
@@ -52,6 +69,9 @@ impl Bucket {
 struct Budget {
     classes: [Bucket; 5],
     bytes: Bucket,
+    feedback: HashMap<(StreamKind, UserId), (Instant, bool)>,
+    notified: HashMap<StreamKind, Instant>,
+    drops: HashMap<StreamKind, u64>,
 }
 impl Budget {
     fn new(now: Instant) -> Self {
@@ -65,6 +85,9 @@ impl Budget {
                 Bucket::new(130.0, 130.0, now),
             ],
             bytes: Bucket::new(8.0 * 1024.0 * 1024.0, 4.0 * 1024.0 * 1024.0, now),
+            feedback: HashMap::new(),
+            notified: HashMap::new(),
+            drops: HashMap::new(),
         }
     }
     fn take(&mut self, class: usize, bytes: usize, now: Instant) -> bool {
@@ -74,6 +97,17 @@ impl Budget {
 
 impl MediaRouter {
     pub(super) fn update(&self, state: &State) {
+        let previous_limits: HashMap<_, _> = self
+            .routes
+            .read()
+            .iter()
+            .flat_map(|(user, route)| {
+                route
+                    .limits
+                    .iter()
+                    .map(move |(kind, limit)| ((*user, *kind), (*limit, route.overcommitted)))
+            })
+            .collect();
         let budgets: HashMap<_, _> = self
             .routes
             .read()
@@ -145,14 +179,89 @@ impl MediaRouter {
                         .get(user)
                         .cloned()
                         .unwrap_or_else(|| Arc::new(Mutex::new(Budget::new(Instant::now())))),
+                    viewers: HashMap::from([
+                        (StreamKind::Screen, screen_users.iter().copied().collect()),
+                        (StreamKind::Camera, peers.iter().copied().collect()),
+                    ]),
+                    limits: HashMap::new(),
+                    overcommitted: false,
                 },
             );
+        }
+        let mut keys = Vec::new();
+        let mut streams = Vec::new();
+        for (key, info) in &state.streams {
+            if let Some(route) = routes.get(&key.0).filter(|r| active(r, key.1)) {
+                let copies = route.viewers[&key.1].len();
+                keys.push(*key);
+                streams.push((
+                    key.1,
+                    crate::media::bitrate::ceiling(key.1, info.width, info.height, info.fps),
+                    copies,
+                ));
+            }
+        }
+        let (limits, overcommitted) = crate::media::bitrate::allocate(&streams, self.video_bps);
+        for (key, limit) in keys.into_iter().zip(limits) {
+            if let Some(route) = routes.get_mut(&key.0) {
+                route.limits.insert(key.1, limit);
+                route.overcommitted = overcommitted;
+                if previous_limits.get(&key) != Some(&(limit, overcommitted)) {
+                    // Push changed allocations even for static desktops, without
+                    // waiting for another video frame or receiver feedback.
+                    route
+                        .sender
+                        .push_urgent(encode_packet(&ServerMsg::VideoControl {
+                            kind: key.1,
+                            max_bps: limit,
+                            congested: false,
+                            healthy: false,
+                            overcommitted,
+                        }));
+                }
+            }
+        }
+        for route in routes.values() {
+            route.budget.lock().feedback.retain(|(kind, viewer), _| {
+                active(route, *kind) && route.viewers[kind].contains(viewer)
+            });
         }
         *self.routes.write() = routes;
     }
 
     /// A control packet is returned to the state actor; media is fully handled here.
     pub(super) fn dispatch(&self, user: UserId, message: ClientMsg) -> Option<ClientMsg> {
+        if let ClientMsg::VideoFeedback {
+            owner,
+            kind,
+            congested,
+        } = message
+        {
+            let routes = self.routes.read();
+            if let Some(route) = routes
+                .get(&owner)
+                .filter(|r| active(r, kind) && r.viewers[&kind].contains(&user))
+            {
+                let now = Instant::now();
+                let mut budget = route.budget.lock();
+                let key = (kind, user);
+                if budget
+                    .feedback
+                    .get(&key)
+                    .is_none_or(|(at, _)| now.duration_since(*at) >= Duration::from_millis(500))
+                {
+                    budget.feedback.insert(key, (now, congested));
+                } else if congested {
+                    // Never let a recent healthy sample hide a subsequent loss.
+                    if let Some((_, bad)) = budget.feedback.get_mut(&key) {
+                        *bad = true;
+                    }
+                }
+                drop(budget);
+                notify_video_control(route, kind, false);
+            }
+            return None;
+        }
         if !matches!(
             &message,
             ClientMsg::Audio { .. }
@@ -275,6 +384,7 @@ fn send_video(route: &Route, kind: StreamKind, packet: Vec<u8>) {
     for out in targets {
         dropped |= out.push_bulk(packet.clone());
     }
+    notify_video_control(route, kind, dropped);
     if dropped {
         let mut last = route.last_keyframe.lock();
         if last
@@ -287,6 +397,61 @@ fn send_video(route: &Route, kind: StreamKind, packet: Vec<u8>) {
                 .push_urgent(encode_packet(&ServerMsg::KeyframeWanted { kind }));
         }
     }
+}
+
+fn notify_video_control(route: &Route, kind: StreamKind, dropped: bool) {
+    let targets = match kind {
+        StreamKind::Screen => &route.screen,
+        StreamKind::Camera => &route.camera,
+    };
+    let now = Instant::now();
+    let mut budget = route.budget.lock();
+    // Latch overflow until the next report, including over TCP fallback.
+    if dropped {
+        budget.drops.insert(kind, u64::MAX);
+    }
+    if budget
+        .notified
+        .get(&kind)
+        .is_some_and(|at| now.duration_since(*at) < Duration::from_secs(1))
+    {
+        return;
+    }
+    budget.notified.insert(kind, now);
+    let stats: Vec<_> = targets.iter().map(Outbox::media_stats).collect();
+    let drops: u64 = stats.iter().map(|s| s.dropped).fold(0, u64::saturating_add);
+    let previous = budget.drops.insert(kind, drops).unwrap_or(drops);
+    let viewers = &route.viewers[&kind];
+    let healthy = !viewers.is_empty()
+        && viewers.iter().all(|user| {
+            budget
+                .feedback
+                .get(&(kind, *user))
+                .is_some_and(|(at, bad)| now.duration_since(*at) <= Duration::from_secs(3) && !bad)
+        });
+    let congested = previous == u64::MAX
+        || drops > previous
+        || stats.iter().any(|s| s.queued_bytes > 150_000)
+        || viewers.iter().any(|user| {
+            budget
+                .feedback
+                .get(&(kind, *user))
+                .is_some_and(|(at, bad)| now.duration_since(*at) <= Duration::from_secs(3) && *bad)
+        });
+    drop(budget);
+    route
+        .sender
+        .push_urgent(encode_packet(&ServerMsg::VideoControl {
+            kind,
+            max_bps: route
+                .limits
+                .get(&kind)
+                .copied()
+                .unwrap_or_else(|| crate::media::bitrate::minimum(kind)),
+            congested,
+            healthy: healthy && !congested,
+            overcommitted: route.overcommitted,
+        }));
 }
 
 impl State {
@@ -383,6 +548,195 @@ mod tests {
             &original,
             &st.media_router.routes.read()[&1].budget
         ));
+        for out in st.clients.values() {
+            out.close();
+        }
+    }
+
+    #[test]
+    fn seven_streams_share_budget_and_only_current_viewers_can_report_health() {
+        let mut st = super::super::tests::fixture();
+        let mut readers = Vec::new();
+        for user in 1..=5 {
+            let (out, peer) = connection();
+            st.clients.insert(user, out);
+            readers.push(peer);
+            st.voice.insert(
+                user,
+                VoiceState {
+                    channel: Some(3),
+                    camera: true,
+                    ..Default::default()
+                },
+            );
+            st.streams.insert(
+                (user, StreamKind::Camera),
+                StreamInfo {
+                    owner: user,
+                    kind: StreamKind::Camera,
+                    label: "camera".into(),
+                    width: 1280,
+                    height: 720,
+                    fps: 30,
+                },
+            );
+            if user <= 2 {
+                st.streams.insert(
+                    (user, StreamKind::Screen),
+                    StreamInfo {
+                        owner: user,
+                        kind: StreamKind::Screen,
+                        label: "screen".into(),
+                        width: 1920,
+                        height: 1080,
+                        fps: 60,
+                    },
+                );
+                st.watchers.insert(
+                    (user, StreamKind::Screen),
+                    (1..=5).filter(|viewer| *viewer != user).collect(),
+                );
+            }
+        }
+        st.refresh_media_routes();
+        {
+            let routes = st.media_router.routes.read();
+            let mut total = 0u64;
+            let mut streams = 0;
+            for route in routes.values() {
+                for (kind, bps) in &route.limits {
+                    assert!(*bps >= crate::media::bitrate::minimum(*kind));
+                    assert!(!route.overcommitted);
+                    assert_eq!(route.viewers[kind].len(), 4);
+                    total += u64::from(*bps) * 4;
+                    streams += 1;
+                }
+            }
+            assert_eq!(streams, 7);
+            assert!((68_000_000..=st.media_router.video_bps).contains(&total));
+        }
+        for user in 2..=5 {
+            assert!(st
+                .media_router
+                .dispatch(
+                    user,
+                    ClientMsg::VideoFeedback {
+                        owner: 1,
+                        kind: StreamKind::Screen,
+                        congested: false
+                    }
+                )
+                .is_none());
+        }
+        {
+            let routes = st.media_router.routes.read();
+            let route = &routes[&1];
+            let mut budget = route.budget.lock();
+            assert_eq!(budget.feedback.len(), 4);
+            budget.notified.clear();
+            drop(budget);
+            notify_video_control(route, StreamKind::Screen, false);
+        }
+        // Initial allocations and the first partial feedback precede the report
+        // confirming that all four current screen viewers are healthy.
+        let mut healthy = false;
+        for _ in 0..4 {
+            if matches!(
+                read_packet::<_, ServerMsg>(&mut readers[0]).unwrap(),
+                ServerMsg::VideoControl {
+                    kind: StreamKind::Screen,
+                    healthy: true,
+                    congested: false,
+                    ..
+                }
+            ) {
+                healthy = true;
+                break;
+            }
+        }
+        assert!(healthy);
+        st.media_router.dispatch(
+            99,
+            ClientMsg::VideoFeedback {
+                owner: 1,
+                kind: StreamKind::Screen,
+                congested: true,
+            },
+        );
+        st.media_router.dispatch(
+            1,
+            ClientMsg::VideoFeedback {
+                owner: 1,
+                kind: StreamKind::Screen,
+                congested: true,
+            },
+        );
+        assert_eq!(
+            st.media_router.routes.read()[&1]
+                .budget
+                .lock()
+                .feedback
+                .len(),
+            4
+        );
+        // An immediate error overrides a just-reported healthy sample.
+        st.media_router.dispatch(
+            2,
+            ClientMsg::VideoFeedback {
+                owner: 1,
+                kind: StreamKind::Screen,
+                congested: true,
+            },
+        );
+        assert!(
+            st.media_router.routes.read()[&1].budget.lock().feedback[&(StreamKind::Screen, 2)].1
+        );
+        {
+            let routes = st.media_router.routes.read();
+            let route = &routes[&1];
+            route.budget.lock().notified.clear();
+            notify_video_control(route, StreamKind::Screen, false);
+        }
+        assert!(matches!(
+            read_packet::<_, ServerMsg>(&mut readers[0]).unwrap(),
+            ServerMsg::VideoControl {
+                healthy: false,
+                congested: true,
+                ..
+            }
+        ));
+        // Old receiver reports cannot authorize growth.
+        {
+            let routes = st.media_router.routes.read();
+            let route = &routes[&1];
+            let mut budget = route.budget.lock();
+            for report in budget.feedback.values_mut() {
+                *report = (Instant::now() - Duration::from_secs(4), false);
+            }
+            budget.notified.clear();
+            drop(budget);
+            notify_video_control(route, StreamKind::Screen, false);
+        }
+        assert!(matches!(
+            read_packet::<_, ServerMsg>(&mut readers[0]).unwrap(),
+            ServerMsg::VideoControl { healthy: false, .. }
+        ));
+        // Leaving the room revokes feedback rights and removes its stored sample.
+        st.voice.get_mut(&2).unwrap().channel = Some(4);
+        st.refresh_media_routes();
+        st.media_router.dispatch(
+            2,
+            ClientMsg::VideoFeedback {
+                owner: 1,
+                kind: StreamKind::Screen,
+                congested: true,
+            },
+        );
+        assert!(!st.media_router.routes.read()[&1]
+            .budget
+            .lock()
+            .feedback
+            .contains_key(&(StreamKind::Screen, 2)));
         for out in st.clients.values() {
             out.close();
         }

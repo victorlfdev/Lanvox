@@ -43,4 +43,6 @@ docker compose cp lanvox-host:/data/amigos.lanvox-backup ./amigos.lanvox-backup
 
 O bundle contém chaves e token: trate-o como credencial. Restaure em uma pasta/volume novo, com o host parado. `docker compose stop` e `down` preservam o volume; comandos que removem volumes apagam seus dados e não fazem parte da operação normal.
 
-Host e clientes devem usar protocolo 5. JSON legado é importado com backup. Restaurar o bundle mantém a identidade que os clientes já conhecem.
+O orçamento de vídeo encaminhado é `LANVOX_VIDEO_BUDGET_MBPS`, por padrão 72 Mb/s. Cada cópia para um espectador entra na conta. O valor cobre alvos médios de vídeo: deixe margem adicional no upload para áudio, protocolos e rajadas. Tela em 480p/720p tem alvo de 3 Mb/s; telas maiores têm piso de 6 Mb/s e câmera tem piso de 1 Mb/s. Se os pisos não couberem, o cliente indica orçamento insuficiente, sem violá-los. Alterar a variável no Compose requer recriar o container; não altera os dados do volume.
+
+Host e clientes devem usar protocolo 7. JSON legado é importado com backup. Restaurar o bundle mantém a identidade que os clientes já conhecem.

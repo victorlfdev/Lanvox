@@ -382,7 +382,7 @@ pub(super) fn handle_msg(state: &Arc<Mutex<State>>, me: UserId, msg: ClientMsg) 
         }
         ClientMsg::StopStream(kind) => st.stop_stream(me, kind),
         // Pointer updates are forwarded by the media router and never reach the state actor.
-        ClientMsg::Cursor(_) => {}
+        ClientMsg::Cursor(_) | ClientMsg::VideoFeedback { .. } => {}
         ClientMsg::EncodedFrame { kind, frame } => {
             if !st.streams.contains_key(&(me, kind))
                 || picture_bytes(frame.width, frame.height).is_none()

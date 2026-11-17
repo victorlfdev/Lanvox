@@ -185,6 +185,25 @@ fn chat_voice_and_screen_share_are_relayed() {
         )
     });
     let mut enc = crate::media::codec::TileEncoder::new();
+    write_packet(
+        &mut bw,
+        &ClientMsg::VideoFeedback {
+            owner: a,
+            kind: StreamKind::Screen,
+            congested: false,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        wait_for(&mut ar, |m| matches!(m, ServerMsg::VideoControl { .. })),
+        ServerMsg::VideoControl {
+            kind: StreamKind::Screen,
+            max_bps: 3_000_000,
+            healthy: true,
+            congested: false,
+            overcommitted: false
+        }
+    ));
     let pic = vec![200u8; 64 * 64 * 4];
     let frame = enc.encode(&pic, 64, 64, 80, true).unwrap();
     write_packet(

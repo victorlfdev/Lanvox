@@ -134,17 +134,10 @@ impl StreamSettings {
             ((f64::from(h) * scale) as u32).max(2) & !1,
         )
     }
-    /// Video bitrate for a picture size, in kbit/s: about 6 Mb/s at 720p, 12 at 1080p
-    /// and 20 at 1440p, scaled with the pixel count. Baseline H.264 needs this much
-    /// for game content; 30 fps or less needs three quarters, 15 fps about half.
+    /// 480p/720p use 3 Mb/s. Larger pictures scale with pixels and frame rate,
+    /// with a 6 Mb/s floor and 40 Mb/s ceiling.
     pub fn bitrate_kbps(&self, w: u32, h: u32) -> u32 {
-        let megapixels = (w as f64 * h as f64) / 1_000_000.0;
-        let rate = match self.fps {
-            0..=15 => 0.55,
-            16..=30 => 0.75,
-            _ => 1.0,
-        };
-        ((megapixels * 5.8 * 1000.0 * rate) as u32).clamp(1500, MAX_KBPS_LIMIT)
+        (super::bitrate::ceiling(StreamKind::Screen, w, h, self.fps) / 1000).min(MAX_KBPS_LIMIT)
     }
     /// Target bitrate (`targetBitrate`) for this preset, in bits per second (estimated).
     pub fn target_bitrate(&self, w: u32, h: u32) -> u64 {
@@ -453,6 +446,9 @@ fn spawn_cursor_thread(
 
 #[derive(Clone, Default)]
 pub struct ShareStats {
+    pub target_bps: u32,
+    pub minimum_bps: u32,
+    pub host_budget_exceeded: bool,
     pub width: u32,
     pub height: u32,
     pub fps: f32,
@@ -493,7 +489,15 @@ impl ScreenShare {
         ctx: egui::Context,
     ) -> ScreenShare {
         let stop = Arc::new(AtomicBool::new(false));
-        let stats = Arc::new(Mutex::new(ShareStats::default()));
+        let (initial_w, initial_h) = settings.dimensions(source.width, source.height);
+        let initial_max_bps = settings.target_bitrate(initial_w, initial_h) as u32;
+        let initial_min_bps =
+            super::bitrate::minimum_for_ceiling(StreamKind::Screen, initial_max_bps);
+        let stats = Arc::new(Mutex::new(ShareStats {
+            target_bps: initial_min_bps,
+            minimum_bps: initial_min_bps,
+            ..ShareStats::default()
+        }));
         let audio = if settings.share_audio {
             match super::voice::MusicEncoder::new() {
                 Ok(mut encoder) => {
@@ -630,9 +634,11 @@ impl ScreenShare {
                 .spawn(move || {
                     let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
                     let mut encoder = TileEncoder::new();
+                    let mut bitrate = super::bitrate::Controller::new(StreamKind::Screen,
+                        initial_max_bps, Instant::now());
                     let mut motion = if settings.motion_video {
                         super::temporal::TemporalEncoder::new(
-                            settings.bitrate_kbps(1920, 1080) * 1000,
+                            bitrate.target(),
                             settings.fps,
                             true,
                         )
@@ -659,6 +665,9 @@ impl ScreenShare {
                     let mut floor_level = 0u32;
                     let mut adaptation = Instant::now();
                     let mut clean_windows = 0u32;
+                    let mut floor_congested_windows = 0u32;
+                    let mut previous_transport_drops = 0u64;
+                    let mut overcommitted = false;
                     let mut dropped_window = 0u64;
                     let mut encoded_frames = 0u32;
                     // Smoothed time to scale, encode and send one picture. When it
@@ -725,10 +734,11 @@ impl ScreenShare {
                                 Some(scale_rgba(&rgba, sw, sh, w, h))
                             };
                             let pic: &[u8] = scaled.as_deref().unwrap_or(&rgba);
-                            budget = settings.target_bitrate(w, h) as f64 / 8.0 * 1.5;
+                            budget = f64::from(bitrate.target()) / 8.0 * 1.5;
                             let rc = rate.get_or_insert_with(|| {
-                                RateControl::new(settings.quality, settings.target_bitrate(w, h))
+                                RateControl::new(settings.quality, u64::from(bitrate.target()))
                             });
+                            rc.target_bps = u64::from(bitrate.target());
                             tokens =
                                 (tokens + token_clock.elapsed().as_secs_f64() * budget).min(budget);
                             token_clock = Instant::now();
@@ -744,7 +754,7 @@ impl ScreenShare {
                                     last_idr = Instant::now();
                                 }
                                 if let Some(video) = motion.as_mut() {
-                                    video.set_bitrate(settings.target_bitrate(w, h) as u32);
+                                    video.set_bitrate(bitrate.target());
                                     let result = video.encode(pic, w, h, force);
                                     let backend = video.backend();
                                     if backend != shown_backend {
@@ -868,22 +878,50 @@ impl ScreenShare {
                             encoded_frames = 0;
                             window = Instant::now();
                         }
-                        if settings.adaptive && adaptation.elapsed() >= Duration::from_secs(1) {
+                        if adaptation.elapsed() >= Duration::from_secs(1) {
                             // Real congestion: the send queue overflowed, the queue is
                             // deeply backed up, or pacing swallowed most captures.
                             let slow = skipped_window > settings.fps.max(1) / 2;
                             // The PC itself cannot finish a picture within a frame period.
                             let overloaded = work_ms > tick.as_secs_f64() * 1000.0 * 0.9;
-                            let congested = dropped_window > 0
+                            let transport = sender.media_stats();
+                            let remote = sender.video_control(StreamKind::Screen);
+                            let network_congested = remote.congested || dropped_window > 0
                                 || slow
-                                || overloaded
-                                || sender.media_stats().queued_bytes
-                                    > (budget / 1.5 / 1000.0 * 8.0) as usize * 128;
+                                || transport.dropped > previous_transport_drops
+                                || transport.queued_bytes > (bitrate.target() as usize / 8 / 5);
+                            previous_transport_drops = transport.dropped;
+                            let (w, h) = last.as_ref().map_or((1920, 1080), |(w, h, _)| settings.dimensions(*w, *h));
+                            let max = settings.target_bitrate(w, h) as u32;
+                            let cap = if remote.max_bps == 0 { max } else { max.min(remote.max_bps) };
+                            let before = bitrate.target();
+                            bitrate.update(cap, network_congested,
+                                remote.healthy && !network_congested, Instant::now());
+                            if before != bitrate.target() {
+                                eprintln!("Tela: bitrate-alvo {} -> {} bit/s", before, bitrate.target());
+                            }
+                            if before != bitrate.target() || remote.overcommitted != overcommitted {
+                                ctx.request_repaint();
+                            }
+                            if remote.overcommitted && !overcommitted {
+                                eprintln!("Vídeo: orçamento do host insuficiente para manter todos os pisos de bitrate");
+                            }
+                            overcommitted = remote.overcommitted;
+                            {
+                                let mut current = stats.lock();
+                                current.target_bps = bitrate.target();
+                                current.minimum_bps = bitrate.floor();
+                                current.host_budget_exceeded = overcommitted;
+                            }
+                            if network_congested && bitrate.target() == bitrate.floor() {
+                                floor_congested_windows += 1;
+                            } else { floor_congested_windows = 0; }
+                            let congested = overloaded || floor_congested_windows >= 3;
                             let previous = level;
-                            if congested {
+                            if settings.adaptive && congested {
                                 level = (level + 1).min(MAX_LEVEL);
                                 clean_windows = 0;
-                            } else {
+                            } else if settings.adaptive {
                                 clean_windows += 1;
                                 // Recover quickly: 3 clean seconds per step up, but only
                                 // when the work measured so far would fit the next step.
@@ -965,12 +1003,27 @@ mod tests {
             s.bitrate_kbps(1920, 1080),
             s.bitrate_kbps(2560, 1440),
         );
-        assert!((5000..=6500).contains(&k720), "{k720}");
+        assert_eq!(k720, 3000);
         assert!((11_000..=13_000).contains(&k1080), "{k1080}");
         assert!((19_000..=22_000).contains(&k1440), "{k1440}");
         let slow = StreamSettings { fps: 30, ..s };
         assert!(slow.bitrate_kbps(1920, 1080) < k1080);
         assert_eq!(s.bitrate_kbps(7680, 4320), MAX_KBPS_LIMIT);
+    }
+
+    #[test]
+    fn low_resolution_presets_use_three_megabits_at_every_frame_rate() {
+        for resolution in [Resolution::P480, Resolution::P720] {
+            for fps in FRAME_RATES {
+                let settings = StreamSettings {
+                    resolution,
+                    fps,
+                    ..StreamSettings::default()
+                };
+                let (w, h) = settings.dimensions(3840, 2160);
+                assert_eq!(settings.target_bitrate(w, h), 3_000_000);
+            }
+        }
     }
 
     #[test]

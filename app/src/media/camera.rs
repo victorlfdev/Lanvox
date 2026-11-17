@@ -74,6 +74,8 @@ impl CameraSettings {
 
 #[derive(Clone, Debug, Default)]
 pub struct CameraStats {
+    pub target_bps: u32,
+    pub host_budget_exceeded: bool,
     pub width: u32,
     pub height: u32,
     pub fps: f32,
@@ -82,7 +84,7 @@ pub struct CameraStats {
 }
 
 fn camera_bitrate(width: u32, height: u32) -> u32 {
-    (width.saturating_mul(height).saturating_mul(3)).clamp(700_000, 6_000_000)
+    (width.saturating_mul(height).saturating_mul(3)).clamp(1_000_000, 6_000_000)
 }
 
 /// Packed RGB to RGBA with opaque alpha, in one pass over a preallocated
@@ -228,8 +230,11 @@ impl CameraSession {
                     let mut bad_frames = 0u32;
                     let mut tick = Duration::from_secs_f64(1.0 / target_fps as f64);
                     let mut seq = 0u32;
+                    let mut bitrate = super::bitrate::Controller::new(StreamKind::Camera,
+                        camera_bitrate(max_w, max_h), Instant::now());
+                    let mut rate = super::codec::RateControl::new(CAMERA_QUALITY, u64::from(bitrate.target()));
                     let mut motion = super::temporal::TemporalEncoder::new(
-                        camera_bitrate(max_w, max_h),
+                        bitrate.target(),
                         target_fps,
                         false,
                     )
@@ -240,6 +245,9 @@ impl CameraSession {
                     let mut adaptation = Instant::now();
                     let mut dropped = false;
                     let mut clean_windows = 0;
+                    let mut floor_congested_windows = 0u32;
+                    let mut previous_transport_drops = 0u64;
+                    let mut overcommitted = false;
                     let mut stats_started = Instant::now();
                     let mut stats_frames = 0u32;
                     while !stop.load(Ordering::SeqCst) {
@@ -285,6 +293,7 @@ impl CameraSession {
                             }
                             seq = seq.wrapping_add(1);
                             if let Some(encoder) = &mut motion {
+                                encoder.set_bitrate(bitrate.target());
                                 if force
                                     || sender.take_camera_keyframe()
                                     || last_key.elapsed() > Duration::from_secs(2)
@@ -294,6 +303,7 @@ impl CameraSession {
                                 }
                                 match encoder.encode(&pic, w, h, force) {
                                     Ok(Some(frame)) => {
+                                        rate.record(frame.data.len());
                                         force =
                                             sender.send_encoded_frame(StreamKind::Camera, frame);
                                         dropped |= force;
@@ -305,8 +315,9 @@ impl CameraSession {
                                     }
                                 }
                             } else {
-                                let jpeg = encode_jpeg(&pic, w, h, CAMERA_QUALITY);
-                                sender.send_frame(
+                                let jpeg = encode_jpeg(&pic, w, h, rate.quality);
+                                rate.record(jpeg.len());
+                                dropped |= sender.send_frame(
                                     StreamKind::Camera,
                                     VideoFrame {
                                         seq,
@@ -324,8 +335,28 @@ impl CameraSession {
                                 );
                             }
                             if adaptation.elapsed() >= Duration::from_secs(1) {
+                                let transport = sender.media_stats();
+                                let remote = sender.video_control(StreamKind::Camera);
+                                let congested = remote.congested || dropped || transport.dropped > previous_transport_drops
+                                    || transport.queued_bytes > (bitrate.target() as usize / 8 / 5);
+                                previous_transport_drops = transport.dropped;
+                                let max = camera_bitrate(max_w, max_h);
+                                let cap = if remote.max_bps == 0 { max } else { max.min(remote.max_bps) };
+                                let before = bitrate.target();
+                                bitrate.update(cap, congested, remote.healthy && !congested, Instant::now());
+                                rate.target_bps = u64::from(bitrate.target());
+                                if before != bitrate.target() {
+                                    eprintln!("Câmera: bitrate-alvo {} -> {} bit/s", before, bitrate.target());
+                                }
+                                if remote.overcommitted && !overcommitted {
+                                    eprintln!("Vídeo: orçamento do host insuficiente para manter todos os pisos de bitrate");
+                                }
+                                overcommitted = remote.overcommitted;
+                                if congested && bitrate.target() == super::bitrate::CAMERA_MIN_BPS {
+                                    floor_congested_windows += 1;
+                                } else { floor_congested_windows = 0; }
                                 let previous_level = adaptive_level;
-                                if dropped || sender.media_stats().queued_bytes > 150_000 {
+                                if floor_congested_windows >= 3 {
                                     adaptive_level = (adaptive_level + 1).min(2);
                                     clean_windows = 0;
                                 } else {
@@ -338,12 +369,6 @@ impl CameraSession {
                                 if adaptive_level != previous_level {
                                     let fps = target_fps / (1 << adaptive_level);
                                     tick = Duration::from_secs_f64(1.0 / f64::from(fps));
-                                    motion = super::temporal::TemporalEncoder::new(
-                                        camera_bitrate(max_w, max_h) / (1 << adaptive_level),
-                                        fps,
-                                        false,
-                                    )
-                                    .ok();
                                     force = true;
                                 }
                                 dropped = false;
@@ -353,6 +378,8 @@ impl CameraSession {
                         stats_frames += 1;
                         if stats_started.elapsed() >= Duration::from_secs(1) {
                             *stats.lock() = CameraStats {
+                                target_bps: if sender.is_some() { bitrate.target() } else { 0 },
+                                host_budget_exceeded: overcommitted,
                                 width: w,
                                 height: h,
                                 fps: stats_frames as f32 / stats_started.elapsed().as_secs_f32(),

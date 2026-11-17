@@ -21,10 +21,10 @@ use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_FLAG_DO_NOT_WAIT,
+    D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
-use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+use windows::Win32::Graphics::Dxgi::{IDXGIDevice, DXGI_ERROR_WAS_STILL_DRAWING};
 use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
@@ -55,8 +55,8 @@ pub struct WgcCapture {
     arrived: Receiver<()>,
     size: SizeInt32,
     /// Two staging textures: the copy of the new frame is queued into one while the
-    /// previous frame is read from the other, so the CPU never waits for the GPU
-    /// to finish a copy queued behind a game's own rendering.
+    /// previous frame is read from the other. Nonblocking Map skips a copy still
+    /// queued behind a game's rendering rather than stalling the capture thread.
     staging: [Option<ID3D11Texture2D>; 2],
     staging_size: (u32, u32),
     /// Index of the texture holding the copy of the previous frame, if any.
@@ -202,14 +202,22 @@ impl WgcCapture {
         index: usize,
         pw: u32,
         ph: u32,
-    ) -> Result<(u32, u32, Vec<u8>), String> {
+    ) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
         let staging = self.staging[index].clone().ok_or("no staging texture")?;
 
         unsafe {
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            self.context
-                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-                .map_err(|e| err("map frame", e))?;
+            match self.context.Map(
+                &staging,
+                0,
+                D3D11_MAP_READ,
+                D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32,
+                Some(&mut mapped),
+            ) {
+                Ok(()) => {}
+                Err(e) if e.code() == DXGI_ERROR_WAS_STILL_DRAWING => return Ok(None),
+                Err(e) => return Err(err("map frame", e)),
+            }
             let pitch = mapped.RowPitch as usize;
             let src = std::slice::from_raw_parts(mapped.pData as *const u8, pitch * ph as usize);
             let row = pw as usize * 4;
@@ -230,15 +238,23 @@ impl WgcCapture {
                     }
                 });
             self.context.Unmap(&staging, 0);
-            Ok((pw, ph, rgba))
+            Ok(Some((pw, ph, rgba)))
         }
     }
 
     /// The copy queued by the last frame, when no newer frame came to push it out
     /// (a still screen would otherwise keep showing an older picture).
     fn flush_pending(&mut self) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
-        match self.pending.take() {
-            Some((index, w, h)) => self.read_staging(index, w, h).map(Some),
+        match self.pending {
+            Some((index, w, h)) => {
+                let picture = self.read_staging(index, w, h)?;
+                // Retain a busy copy: a static desktop may never supply another
+                // frame, so the next grab must retry this final picture.
+                if picture.is_some() {
+                    self.pending = None;
+                }
+                Ok(picture)
+            }
             None => Ok(None),
         }
     }
@@ -291,13 +307,18 @@ impl WgcCapture {
         let write = self.next_staging;
         self.next_staging ^= 1;
         let target = self.staging[write].clone().ok_or("no staging texture")?;
-        unsafe { self.context.CopyResource(&target, &texture) };
+        unsafe {
+            self.context.CopyResource(&target, &texture);
+            // Nonblocking Map does not submit queued copies for us. Submit now
+            // so the last frame also completes when the desktop becomes static.
+            self.context.Flush();
+        }
         let previous = self.pending.replace((write, w, h));
         let Some((read, pw, ph)) = previous else {
             // First frame: nothing to show yet; the next grab returns this one.
             return Ok(None);
         };
-        self.read_staging(read, pw, ph).map(Some)
+        self.read_staging(read, pw, ph)
     }
 }
 

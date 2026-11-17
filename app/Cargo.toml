@@ -9,7 +9,7 @@ license = "Apache-2.0"
 default = ["gui"]
 # The window, audio, camera and screen capture. Turn off (`--no-default-features`)
 # to build only the host that runs in Docker.
-gui = ["dep:eframe", "dep:egui", "dep:cpal", "dep:xcap", "dep:nokhwa", "dep:winit", "dep:rfd", "dep:if-addrs", "dep:opusic-c", "dep:sonora", "dep:wasapi", "dep:openh264", "dep:bzip2", "dep:nnnoiseless", "dep:arboard"]
+gui = ["dep:eframe", "dep:egui", "dep:cpal", "dep:xcap", "dep:nokhwa", "dep:winit", "dep:rfd", "dep:if-addrs", "dep:opusic-c", "dep:sonora", "dep:wasapi", "dep:openh264", "dep:openh264-sys2", "dep:bzip2", "dep:nnnoiseless", "dep:arboard"]
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wayland", "x11"], optional = true }
@@ -40,6 +40,7 @@ sonora = { version = "0.3", optional = true }
 # Cisco's binary is loaded at run time (see src/media/openh264_runtime.rs); the
 # source build is only compiled into tests.
 openh264 = { version = "0.9.10", default-features = false, features = ["libloading"], optional = true }
+openh264-sys2 = { version = "0.9.10", default-features = false, features = ["libloading"], optional = true }
 bzip2 = { version = "0.6", optional = true }
 winit = { version = "0.30", optional = true }
 nnnoiseless = { version = "0.5.2", default-features = false, optional = true }

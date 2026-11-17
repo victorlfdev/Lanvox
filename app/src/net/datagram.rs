@@ -72,10 +72,15 @@ impl Replay {
             let shift = (value - highest).min(1024) as usize;
             let previous = self.bits;
             self.bits.fill(0);
-            for old in 0..1024usize.saturating_sub(shift) {
-                if previous[old / 64] & (1 << (old % 64)) != 0 {
-                    let new = old + shift;
-                    self.bits[new / 64] |= 1 << (new % 64);
+            // Shift whole words instead of visiting all 1024 sequence slots for
+            // every received fragment. Keep the same replay/reordering window.
+            let words = shift / 64;
+            let bits = shift % 64;
+            for dest in words..self.bits.len() {
+                let source = dest - words;
+                self.bits[dest] = previous[source] << bits;
+                if bits != 0 && source > 0 {
+                    self.bits[dest] |= previous[source - 1] >> (64 - bits);
                 }
             }
         }
@@ -89,6 +94,7 @@ struct Assembly {
     created: Instant,
     pieces: Vec<Option<Vec<u8>>>,
     bytes: usize,
+    remaining: usize,
 }
 
 struct Session {
@@ -238,6 +244,7 @@ impl Session {
             created: Instant::now(),
             pieces: vec![None; count],
             bytes: 0,
+            remaining: count,
         });
         if assembly.pieces.len() != count || assembly.pieces[index].is_some() {
             return None;
@@ -248,7 +255,8 @@ impl Session {
             return None;
         }
         assembly.pieces[index] = Some(plain.to_vec());
-        if assembly.pieces.iter().any(Option::is_none) {
+        assembly.remaining -= 1;
+        if assembly.remaining != 0 {
             return None;
         }
         let complete = map.remove(&id)?;
@@ -340,34 +348,38 @@ impl MediaSender {
                     let (pending, bulk) = {
                         let (lock, cv) = &*worker.queue;
                         let mut queue = lock.lock();
-                        if queue.urgent.is_empty() && queue.bulk.is_empty() {
-                            cv.wait_for(&mut queue, Duration::from_millis(100));
-                        }
-                        match queue.urgent.pop_front() {
-                            Some(p) => (Some(p), false),
-                            None => (queue.bulk.pop_front(), true),
+                        loop {
+                            if !worker.session.alive.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            if let Some(p) = queue.urgent.pop_front() {
+                                break (Some(p), false);
+                            }
+                            if !queue.bulk.is_empty() {
+                                let wait = next_bulk.saturating_duration_since(Instant::now());
+                                if wait.is_zero() {
+                                    break (queue.bulk.pop_front(), true);
+                                }
+                                // Scheduler delays are recovered by the bounded
+                                // 5 ms allowance below, never by spinning.
+                                // Windows condvar timeouts round up to coarse
+                                // system ticks. Rust's sleep uses a high resolution
+                                // waitable timer; cap it at 1 ms so audio and close
+                                // remain responsive even without a notification.
+                                #[cfg(windows)]
+                                {
+                                    drop(queue);
+                                    std::thread::sleep(wait.min(Duration::from_millis(1)));
+                                    queue = lock.lock();
+                                }
+                                #[cfg(not(windows))]
+                                cv.wait_for(&mut queue, wait);
+                            } else {
+                                cv.wait_for(&mut queue, Duration::from_millis(100));
+                            }
                         }
                     };
                     let Some(mut pending) = pending else { continue };
-                    if bulk {
-                        // Pace video; urgent audio is picked first on every loop so
-                        // it is never held up by more than one fragment.
-                        loop {
-                            let now = Instant::now();
-                            if now >= next_bulk {
-                                break;
-                            }
-                            let wait = next_bulk - now;
-                            if wait > Duration::from_millis(2) {
-                                std::thread::sleep(Duration::from_millis(1));
-                            } else {
-                                std::hint::spin_loop();
-                            }
-                            if !worker.queue.0.lock().urgent.is_empty() {
-                                break;
-                            }
-                        }
-                    }
                     let max_age = if bulk { VIDEO_AGE } else { MEDIA_AGE };
                     if pending.created.elapsed() > max_age {
                         let mut queue = worker.queue.0.lock();
@@ -685,6 +697,109 @@ mod tests {
     use super::*;
 
     #[test]
+    fn replay_window_matches_sequence_set_across_word_boundaries() {
+        let mut replay = Replay::default();
+        let mut seen = std::collections::HashSet::new();
+        let mut highest = 0u64;
+        let mut seed = 17u64;
+        let mut values = vec![
+            0, 1, 63, 64, 65, 127, 128, 1023, 1024, 1025, 64, 4096, 3073, 3072,
+        ];
+        for _ in 0..10_000 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            highest += seed % 4;
+            values.push(highest.saturating_sub((seed >> 32) % 1200));
+        }
+        highest = 0;
+        for value in values {
+            highest = highest.max(value);
+            let expected = highest - value < 1024 && seen.insert(value);
+            assert_eq!(
+                replay.accept(value),
+                expected,
+                "sequence {value}, highest {highest}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual CPU benchmark; reports throughput without network or capture"]
+    fn benchmark_media_reassembly() {
+        let client = Session::new([23; 16], [29; 32], true, None);
+        let server = Session::new([23; 16], [29; 32], false, None);
+        let address = "127.0.0.1:47800".parse().unwrap();
+        for size in [25_000usize, 250_000, 1_000_000] {
+            let data = vec![7u8; size];
+            let started = Instant::now();
+            let frames = 100;
+            let mut completed = 0;
+            for id in 0..frames {
+                let count = size.div_ceil(CHUNK);
+                for (index, chunk) in data.chunks(CHUNK).enumerate() {
+                    let packet = client.seal(id, index as u16, count as u16, chunk).unwrap();
+                    if let Some(complete) = server.open(&packet, address) {
+                        assert_eq!(complete, data);
+                        completed += 1;
+                    }
+                }
+            }
+            assert_eq!(completed, frames);
+            eprintln!(
+                "media reassembly {size} bytes: {:.1} fps, {:.1} Mb/s",
+                frames as f64 / started.elapsed().as_secs_f64(),
+                (frames as f64 * size as f64 * 8.0) / started.elapsed().as_secs_f64() / 1e6
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual paced UDP sender benchmark; opens loopback sockets"]
+    fn benchmark_media_sender() {
+        let sink = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sink.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let address = sink.local_addr().unwrap();
+        let alive = Arc::new(AtomicBool::new(true));
+        let receiving = alive.clone();
+        let reader = std::thread::spawn(move || {
+            let mut buffer = [0u8; 1500];
+            let mut bytes = 0usize;
+            while receiving.load(Ordering::Relaxed) {
+                if let Ok(n) = sink.recv(&mut buffer) {
+                    bytes += n;
+                }
+            }
+            bytes
+        });
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
+        let session = Arc::new(Session::new([31; 16], [37; 32], true, Some(address)));
+        let sender = MediaSender::start(socket, session);
+        let start = Instant::now();
+        for i in 0..120 {
+            let due = start + Duration::from_secs_f64(i as f64 / 60.0);
+            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+            sender.send(vec![7; 75_000], false);
+        }
+        while sender.stats().queued_bytes > 0 && start.elapsed() < Duration::from_secs(4) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let elapsed = start.elapsed();
+        let stats = sender.stats();
+        sender.close();
+        alive.store(false, Ordering::Relaxed);
+        let received = reader.join().unwrap();
+        eprintln!(
+            "paced sender: {:.3}s, {} sent, {} received, {} dropped",
+            elapsed.as_secs_f64(),
+            stats.sent_bytes,
+            received,
+            stats.dropped
+        );
+        assert_eq!(stats.dropped, 0);
+        assert_eq!(stats.queued_bytes, 0);
+    }
+
+    #[test]
     fn authenticates_binds_direction_and_rejects_tampering_replay_and_other_sessions() {
         let client = Session::new([1; 16], [7; 32], true, None);
         let server = Session::new([1; 16], [7; 32], false, None);
@@ -710,6 +825,21 @@ mod tests {
         assert!(server.open(&second, address).is_none());
         assert!(server.open(&second, address).is_none());
         assert_eq!(server.open(&first, address).unwrap(), b"firstsecond");
+    }
+
+    #[test]
+    fn duplicate_fragment_with_fresh_nonce_does_not_complete_assembly_early() {
+        let client = Session::new([41; 16], [43; 32], true, None);
+        let server = Session::new([41; 16], [43; 32], false, None);
+        let address = "127.0.0.1:47800".parse().unwrap();
+        for _ in 0..3 {
+            let repeated = client.seal(1, 1, 3, b"middle").unwrap();
+            assert!(server.open(&repeated, address).is_none());
+        }
+        let last = client.seal(1, 2, 3, b"last").unwrap();
+        assert!(server.open(&last, address).is_none());
+        let first = client.seal(1, 0, 3, b"first").unwrap();
+        assert_eq!(server.open(&first, address).unwrap(), b"firstmiddlelast");
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub struct TemporalEncoder {
     screen: bool,
     /// Picture size the CPU encoder was last fed; a change needs a fresh encoder.
     cpu_size: Option<(u32, u32)>,
+    cpu_bitrate: u32,
     hw: HwState,
 }
 
@@ -74,7 +75,10 @@ impl TemporalEncoder {
         let HwState::Active(hw, verified) = &mut self.hw else {
             return None;
         };
-        let outcome = match hw.encode(rgba, force) {
+        let outcome = match hw
+            .set_bitrate(self.bitrate)
+            .and_then(|()| hw.encode(rgba, force))
+        {
             Ok(Some((data, keyframe))) => {
                 if data.len() > 2 * 1024 * 1024 {
                     Err("Quadro H.264 excede o limite de 2 MiB".to_string())
@@ -138,20 +142,9 @@ impl TemporalEncoder {
         Encoder::with_api_config(api, config).map_err(|error| error.to_string())
     }
 
-    /// Bitrate for the next (re)start of the encoder. A running one keeps its
-    /// rate; a picture-size change (which restarts it) picks the new one up.
+    /// Applied on the next encode, in place on GPU and initialized CPU encoders.
     pub fn set_bitrate(&mut self, bitrate: u32) {
-        let bitrate = bitrate.clamp(128_000, 40_000_000);
-        if bitrate == self.bitrate {
-            return;
-        }
-        self.bitrate = bitrate;
-        // Nothing encoded yet on the CPU path: the encoder can still be rebuilt.
-        if self.cpu_size.is_none() {
-            if let Ok(encoder) = Self::build_encoder(bitrate, self.fps, self.screen) {
-                self.encoder = encoder;
-            }
-        }
+        self.bitrate = bitrate.clamp(128_000, 40_000_000);
     }
 
     pub fn new(bitrate: u32, fps: u32, screen: bool) -> Result<Self, String> {
@@ -163,6 +156,7 @@ impl TemporalEncoder {
             fps: fps.clamp(1, 60),
             screen,
             cpu_size: None,
+            cpu_bitrate: bitrate.clamp(128_000, 40_000_000),
             hw: HwState::Untried,
         })
     }
@@ -187,11 +181,47 @@ impl TemporalEncoder {
         // A switch from GPU to CPU mid-stream must start with a fresh IDR.
         let mut force = force || was_hardware;
         if self.cpu_size != Some((width, height)) {
-            if self.cpu_size.is_some() {
+            if self.cpu_size.is_some() || self.cpu_bitrate != self.bitrate {
                 self.encoder = Self::build_encoder(self.bitrate, self.fps, self.screen)?;
             }
+            self.cpu_bitrate = self.bitrate;
             self.cpu_size = Some((width, height));
             force = true;
+        }
+        if self.cpu_bitrate != self.bitrate {
+            use openh264_sys2::{
+                SBitrateInfo, ENCODER_OPTION_BITRATE, ENCODER_OPTION_MAX_BITRATE, SPATIAL_LAYER_0,
+                SPATIAL_LAYER_ALL,
+            };
+            let mut info = SBitrateInfo {
+                iLayer: SPATIAL_LAYER_ALL,
+                iBitrate: self.bitrate as i32,
+            };
+            let options = if self.bitrate > self.cpu_bitrate {
+                [ENCODER_OPTION_MAX_BITRATE, ENCODER_OPTION_BITRATE]
+            } else {
+                [ENCODER_OPTION_BITRATE, ENCODER_OPTION_MAX_BITRATE]
+            };
+            for option in options {
+                // ALL changes only the global maximum, leaving the spatial
+                // layer capped at its original bitrate. Update layer zero.
+                info.iLayer = if option == ENCODER_OPTION_MAX_BITRATE {
+                    SPATIAL_LAYER_0
+                } else {
+                    SPATIAL_LAYER_ALL
+                };
+                // The encoder is initialized, exclusively owned by this worker,
+                // and SetOption reads the ABI-matched SBitrateInfo synchronously.
+                let result = unsafe {
+                    self.encoder
+                        .raw_api()
+                        .set_option(option, (&mut info as *mut SBitrateInfo).cast())
+                };
+                if result != 0 {
+                    return Err(format!("OpenH264 recusou ajuste de bitrate ({result})"));
+                }
+            }
+            self.cpu_bitrate = self.bitrate;
         }
         if force {
             self.encoder.force_intra_frame();
@@ -479,6 +509,100 @@ impl TemporalDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_bitrate_changes_preserve_sequence_and_decode_on_cpu_and_available_gpu() {
+        for software in [true, false] {
+            let mut encoder = TemporalEncoder::new(2_000_000, 30, false).unwrap();
+            if software {
+                encoder.hw = HwState::Off;
+            }
+            let mut decoder = TemporalDecoder::new().unwrap();
+            let (w, h) = (640u32, 360u32);
+            let mut pixels = vec![255u8; (w * h * 4) as usize];
+            let mut last_seq = 0u32;
+            let mut decoded = 0;
+            for i in 0..180u32 {
+                let requested = [2_000_000, 1_000_000, 2_800_000, 1_000_000][(i / 45) as usize];
+                encoder.set_bitrate(requested);
+                for (n, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let x = n as u32 % w;
+                    let y = n as u32 / w;
+                    *pixel = [
+                        ((x + i * 3) % 251) as u8,
+                        ((y + i) % 251) as u8,
+                        ((x / 8 + y / 8) % 251) as u8,
+                        255,
+                    ];
+                }
+                if let Some(frame) = encoder.encode(&pixels, w, h, i == 0).unwrap() {
+                    assert_eq!(frame.seq, last_seq.wrapping_add(1));
+                    last_seq = frame.seq;
+                    assert!(decoder.decode(&frame).unwrap().is_some(), "frame {i}");
+                    decoded += 1;
+                }
+                if matches!(encoder.hw, HwState::Off) {
+                    use openh264_sys2::{SBitrateInfo, ENCODER_OPTION_BITRATE, SPATIAL_LAYER_ALL};
+                    let mut actual = SBitrateInfo {
+                        iLayer: SPATIAL_LAYER_ALL,
+                        iBitrate: 0,
+                    };
+                    let result = unsafe {
+                        encoder.encoder.raw_api().get_option(
+                            ENCODER_OPTION_BITRATE,
+                            (&mut actual as *mut SBitrateInfo).cast(),
+                        )
+                    };
+                    assert_eq!(result, 0);
+                    assert_eq!(actual.iBitrate as u32, requested);
+                }
+            }
+            eprintln!(
+                "live bitrate changes {}: {decoded}/180 decoded",
+                encoder.backend()
+            );
+            assert!(decoded >= 170);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual 1080p60 encoder benchmark; uses the available GPU or CPU"]
+    fn benchmark_1080p_motion_encode() {
+        let (w, h) = (1920u32, 1080u32);
+        let mut encoder = TemporalEncoder::new(12_000_000, 60, true).unwrap();
+        let mut decoder = TemporalDecoder::new().unwrap();
+        let mut pixels = vec![255; (w * h * 4) as usize];
+        let mut timings = Vec::new();
+        let mut bytes = [0usize; 4];
+        let mut decoded = 0;
+        for i in 0..120u32 {
+            let phase = (i / 30) as usize;
+            encoder.set_bitrate([6_000_000, 8_000_000, 12_000_000, 6_000_000][phase]);
+            for (n, px) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let x = n as u32 % w;
+                let y = n as u32 / w;
+                *px = [
+                    ((x + i * 8) % 256) as u8,
+                    ((y + i * 3) % 256) as u8,
+                    ((x / 16 + y / 16 + i) % 256) as u8,
+                    255,
+                ];
+            }
+            let start = std::time::Instant::now();
+            let frame = encoder.encode(&pixels, w, h, i == 0).unwrap();
+            timings.push(start.elapsed().as_secs_f64() * 1000.0);
+            if let Some(frame) = frame {
+                bytes[phase] += frame.data.len();
+                if decoder.decode(&frame).unwrap().is_some() {
+                    decoded += 1;
+                }
+            }
+        }
+        timings.sort_by(f64::total_cmp);
+        eprintln!("1080p60 {}: encode mean {:.2}ms p50 {:.2}ms p95 {:.2}ms max {:.2}ms, {decoded}/120 decoded", encoder.backend(), timings.iter().sum::<f64>()/timings.len() as f64, timings[60], timings[114], timings[119]);
+        eprintln!("1080p60 dynamic targets 6/8/12/6 Mb/s: bytes per 30-frame phase {bytes:?}");
+        assert_eq!(decoded, 120);
+    }
 
     #[test]
     fn h264_roundtrip_rejects_missing_delta_and_recovers_on_real_idr() {

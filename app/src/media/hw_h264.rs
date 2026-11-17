@@ -65,6 +65,9 @@ impl HwEncoder {
     pub fn name(&self) -> &str {
         ""
     }
+    pub fn set_bitrate(&mut self, _: u32) -> Result<(), String> {
+        Err("indisponível".into())
+    }
     pub fn encode(&mut self, _: &[u8], _: bool) -> Result<Option<(Vec<u8>, bool)>, String> {
         Err("indisponível".into())
     }
@@ -102,6 +105,7 @@ mod imp {
     }
 
     pub struct HwEncoder {
+        bitrate: u32,
         mft: IMFTransform,
         events: Option<IMFMediaEventGenerator>,
         codec: Option<ICodecAPI>,
@@ -318,6 +322,7 @@ mod imp {
                 .map_err(|e| err("START_OF_STREAM", e))?;
 
             let mut enc = Self {
+                bitrate,
                 mft,
                 events,
                 codec,
@@ -345,6 +350,23 @@ mod imp {
 
         pub fn name(&self) -> &str {
             &self.name
+        }
+
+        pub fn set_bitrate(&mut self, bitrate: u32) -> Result<(), String> {
+            if bitrate == self.bitrate {
+                return Ok(());
+            }
+            let codec = self
+                .codec
+                .as_ref()
+                .ok_or("Encoder de GPU não permite ajustar bitrate")?;
+            unsafe {
+                codec
+                    .SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate))
+                    .map_err(|e| err("ajustar bitrate da GPU", e))?;
+            }
+            self.bitrate = bitrate;
+            Ok(())
         }
 
         fn refresh_sequence_header(&mut self) {

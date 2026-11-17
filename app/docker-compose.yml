@@ -9,6 +9,7 @@ services:
       LANVOX_NAME: "Lanvox Hub"
       LANVOX_BIND: "0.0.0.0"
       LANVOX_OWNER_KEY: "${LANVOX_OWNER_KEY:-}"
+      LANVOX_VIDEO_BUDGET_MBPS: "${LANVOX_VIDEO_BUDGET_MBPS:-72}"
     volumes:
       - lanvox-data:/data
 volumes:

@@ -520,6 +520,17 @@ pub(super) fn streaming_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         let stats = share.stats.lock().clone();
         ui.label(format!("{} · encode {:.1}ms", stats.codec, stats.encode_ms));
         ui.label(format!(
+            "Bitrate-alvo {:.2} Mb/s · mínimo {:.0} Mb/s",
+            stats.target_bps as f64 / 1_000_000.0,
+            stats.minimum_bps as f64 / 1_000_000.0
+        ));
+        if stats.host_budget_exceeded {
+            ui.label(
+                RichText::new("A soma dos bitrates mínimos excede o orçamento de vídeo do host.")
+                    .color(theme::color(theme::YELLOW)),
+            );
+        }
+        ui.label(format!(
             "Captura {:.1}fps · codificado {:.1}fps · enviado {:.1}fps · descartados {}",
             stats.capture_fps, stats.encoded_fps, stats.fps, stats.dropped_frames
         ));

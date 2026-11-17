@@ -594,6 +594,18 @@ pub(super) fn video_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             .small()
             .color(theme::color(theme::TEXT_MUTED)),
         );
+        if stats.target_bps > 0 {
+            ui.label(format!(
+                "Bitrate-alvo {:.2} Mb/s · mínimo 1 Mb/s",
+                stats.target_bps as f64 / 1_000_000.0
+            ));
+        }
+        if stats.host_budget_exceeded {
+            ui.label(
+                RichText::new("A soma dos bitrates mínimos excede o orçamento de vídeo do host.")
+                    .color(theme::color(theme::YELLOW)),
+            );
+        }
     }
     ui.add_space(10.0);
     let key = (app.me(), StreamKind::Camera);
