@@ -6,11 +6,13 @@ pub(super) fn voice_members(app: &mut LanvoxApp, ui: &mut egui::Ui, channel: Cha
     let mut open_stream = None;
     let mut menu_targets = Vec::new();
     for id in people {
+        let view = app.view.as_ref().unwrap();
         let state = view.voice.get(&id).cloned().unwrap_or_default();
         let name = view.user_name(id);
-        let color = color32(view.user_color(id));
+        let color = view.user_color(id);
         let speaking = view.speaking.contains(&id)
             || (id == view.me && app.audio_shared.speaking.load(Ordering::Relaxed));
+        let texture = app.avatar_texture(ui.ctx(), id);
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
         resp.widget_info(|| {
             egui::WidgetInfo::labeled(
@@ -48,7 +50,12 @@ pub(super) fn voice_members(app: &mut LanvoxApp, ui: &mut egui::Ui, channel: Cha
         }
         let av =
             Rect::from_center_size(pos2(rect.left() + 46.0, rect.center().y), vec2(24.0, 24.0));
-        widgets::avatar_at(ui, av, &name, color, speaking, None);
+        Avatar::new(&name, AvatarSize::Xs)
+            .user(id)
+            .color(color)
+            .texture(texture.as_ref())
+            .speaking(speaking)
+            .paint(ui, av);
         ui.painter().text(
             pos2(rect.left() + 66.0, rect.center().y),
             Align2::LEFT_CENTER,
@@ -335,4 +342,31 @@ pub(super) fn user_panel(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voice_member_row_renders_profile_avatar() {
+        let (mut app, ctx) = crate::app::ui_regressions::fixture();
+        app.view
+            .as_mut()
+            .unwrap()
+            .apply_workspace(&WorkspaceEvent::ProfileUpdated(Profile {
+                user: 2,
+                avatar: crate::app::ui_regressions::avatar_png(80),
+                ..Default::default()
+            }));
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            voice_members(&mut app, ui, 3);
+        });
+        let texture = app.avatar_texture(&ctx, 2).unwrap();
+        assert!(crate::app::ui_regressions::renders_texture(
+            &ctx,
+            output,
+            texture.id()
+        ));
+    }
 }

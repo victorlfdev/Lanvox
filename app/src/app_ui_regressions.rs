@@ -1,6 +1,32 @@
 //! Client interaction regressions, with demo data and no network/capture devices.
 use super::*;
 
+pub(crate) fn avatar_png(value: u8) -> Vec<u8> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        8,
+        8,
+        image::Rgba([value, 100, 150, 255]),
+    ))
+    .write_to(&mut bytes, image::ImageFormat::Png)
+    .unwrap();
+    bytes.into_inner()
+}
+
+pub(crate) fn renders_texture(
+    ctx: &egui::Context,
+    mut output: egui::FullOutput,
+    texture: egui::TextureId,
+) -> bool {
+    output.textures_delta.clear();
+    ctx.tessellate(output.shapes, output.pixels_per_point)
+        .iter()
+        .any(|primitive| {
+            matches!(&primitive.primitive, egui::epaint::Primitive::Mesh(mesh)
+                if mesh.texture_id == texture && !mesh.indices.is_empty())
+        })
+}
+
 pub(crate) fn fixture() -> (LanvoxApp, egui::Context) {
     let ctx = egui::Context::default();
     let cc = eframe::CreationContext::_new_kittest(ctx.clone());

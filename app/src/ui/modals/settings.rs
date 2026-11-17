@@ -256,6 +256,7 @@ pub(super) fn account_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         }
     }
     ui.add_space(12.0);
+    let avatar_texture = app.avatar_texture(ui.ctx(), app.me());
     Frame::new()
         .fill(theme::color(theme::RAIL))
         .corner_radius(8)
@@ -268,6 +269,7 @@ pub(super) fn account_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
                     super::super::avatar::AvatarSize::Xl,
                 )
                 .color(app.settings.color)
+                .texture(avatar_texture.as_ref())
                 .presence(super::super::avatar::PresenceState::resolve(
                     connected,
                     app.view

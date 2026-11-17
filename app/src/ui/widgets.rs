@@ -1,51 +1,9 @@
 //! Small reusable pieces: avatars, icon buttons, section labels.
 
-use egui::{vec2, Align2, Color32, FontId, Rect, Response, Sense, Stroke, Ui};
+use egui::{vec2, Color32, Rect, Response, Sense, Stroke, Ui};
 
 use super::icons::{self, Icon};
 use super::theme;
-
-/// A round avatar with the first letter of the name, a green ring while speaking
-/// and an optional online dot.
-pub fn avatar_at(
-    ui: &Ui,
-    rect: Rect,
-    name: &str,
-    color: Color32,
-    speaking: bool,
-    status: Option<bool>,
-) {
-    let p = ui.painter();
-    let c = rect.center();
-    let radius = rect.width() / 2.0;
-    p.circle_filled(c, radius, color);
-    let letter: String = name
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_default();
-    p.text(
-        c,
-        Align2::CENTER_CENTER,
-        letter,
-        FontId::proportional(radius * 0.95),
-        theme::on_color(color),
-    );
-    if speaking {
-        p.circle_stroke(c, radius + 1.5, Stroke::new(2.5, theme::GREEN));
-    }
-    if let Some(online) = status {
-        let dot = c + vec2(radius * 0.72, radius * 0.72);
-        let dr = (radius * 0.32).max(4.0);
-        p.circle_filled(dot, dr + 2.0, theme::color(theme::SIDEBAR));
-        if online {
-            p.circle_filled(dot, dr, theme::GREEN);
-        } else {
-            p.circle_filled(dot, dr, theme::TEXT_FAINT);
-            p.circle_filled(dot, dr * 0.45, theme::color(theme::SIDEBAR));
-        }
-    }
-}
 
 /// A square icon button with hover background and tooltip.
 pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32, color: Color32, tip: &str) -> Response {

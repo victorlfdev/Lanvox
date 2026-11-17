@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::avatar::{Avatar, AvatarSize};
 
 /// Call panel embedded at the top of a conversation (group or DM).
 pub fn embedded(app: &mut LanvoxApp, ui: &mut egui::Ui, call: ChannelId) {
@@ -187,7 +188,8 @@ pub(super) fn person_tile(
     let Some(view) = &app.view else { return };
     let me = view.me;
     let name = view.user_name(id);
-    let color = color32(view.user_color(id));
+    let avatar_color = view.user_color(id);
+    let color = color32(avatar_color);
     let state = view.voice.get(&id).cloned().unwrap_or_default();
     let speaking = view.speaking.contains(&id)
         || (id == me && app.audio_shared.speaking.load(Ordering::Relaxed));
@@ -226,7 +228,13 @@ pub(super) fn person_tile(
     } else {
         let d = (rect.height() * 0.38).clamp(28.0, 96.0);
         let av = Rect::from_center_size(rect.center(), vec2(d, d));
-        widgets::avatar_at(ui, av, &name, color, speaking, None);
+        let texture = app.avatar_texture(ctx, id);
+        Avatar::new(&name, AvatarSize::Xl)
+            .user(id)
+            .color(avatar_color)
+            .texture(texture.as_ref())
+            .speaking(speaking)
+            .paint(ui, av);
     }
     // Name tag.
     let galley = painter.layout_no_wrap(name.clone(), FontId::proportional(13.0), Color32::WHITE);
@@ -489,4 +497,54 @@ pub(super) fn contain(rect: Rect, size: egui::Vec2) -> Rect {
 pub(super) fn cover(rect: Rect, size: egui::Vec2) -> Rect {
     let s = (rect.width() / size.x).max(rect.height() / size.y);
     Rect::from_center_size(rect.center(), size * s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn participant_avatar_tracks_profile_changes_even_while_waiting_for_camera() {
+        let (mut app, ctx) = crate::app::ui_regressions::fixture();
+        let mut previous_texture = None;
+        for (avatar, camera) in [
+            (crate::app::ui_regressions::avatar_png(30), false),
+            (crate::app::ui_regressions::avatar_png(200), true),
+            (Vec::new(), false),
+            (vec![0, 1, 2], false),
+        ] {
+            let view = app.view.as_mut().unwrap();
+            view.apply_workspace(&WorkspaceEvent::ProfileUpdated(Profile {
+                user: 2,
+                avatar,
+                ..Default::default()
+            }));
+            view.voice.get_mut(&2).unwrap().camera = camera;
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                person_tile(
+                    &mut app,
+                    ui,
+                    &ctx,
+                    Rect::from_min_size(pos2(0.0, 0.0), vec2(320.0, 180.0)),
+                    2,
+                );
+            });
+            let texture = app.avatar_texture(&ctx, 2);
+            if let Some(texture) = texture {
+                assert_ne!(previous_texture, Some(texture.id()));
+                assert!(crate::app::ui_regressions::renders_texture(
+                    &ctx,
+                    output,
+                    texture.id()
+                ));
+                previous_texture = Some(texture.id());
+            } else {
+                assert!(!crate::app::ui_regressions::renders_texture(
+                    &ctx,
+                    output,
+                    previous_texture.unwrap()
+                ));
+            }
+        }
+    }
 }
