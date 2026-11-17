@@ -1,26 +1,20 @@
-# Lanvox 0.2.0
+# Lanvox 0.3.0
 
-**Esta versão usa o protocolo 6: atualize o host e todos os clientes juntos. Clientes de versões anteriores não são compatíveis com o novo host.**
+**Esta versão usa o protocolo 7: atualize o host e todos os clientes juntos. Clientes de versões anteriores não são compatíveis com o novo host.**
 
-## Atualizações
+## Vídeo e compartilhamento de tela
 
-- Com a opção de atualização automática ativada, o app consulta novas versões ao abrir e a cada 5 minutos, baixa e verifica o instalador assinado e instala quando não há conexão, reconexão ou host ativo. Depois da instalação, o app reabre automaticamente.
-- Os controles manuais de atualização continuam disponíveis nas configurações. Versões anteriores mantêm seu comportamento de atualização até instalar esta versão.
+- Bitrate adaptável para câmera e compartilhamento de tela, com feedback autenticado dos espectadores e ajuste conforme perdas e filas de vídeo.
+- Compartilhamento em 480p e 720p com alvo de 3 Mb/s. Em resoluções maiores, a tela começa em 6 Mb/s; câmera começa em 1 Mb/s. Conteúdo estático pode consumir menos banda.
+- Ajustes de bitrate H.264 durante a transmissão, tanto no encoder de GPU quanto no de CPU, com fallback para CPU caso o driver rejeite a mudança.
+- Orçamento de vídeo do host configurável por `LANVOX_VIDEO_BUDGET_MBPS`, com padrão de 72 Mb/s, considerando cada cópia enviada aos espectadores.
+- Diagnósticos mostram os alvos de bitrate e avisam quando o orçamento é insuficiente para os pisos das transmissões. O orçamento distribui alvos médios; não é um limitador rígido de tráfego.
 
-## Interface e conversas
+## Desempenho e interface
 
-- Correção ao colar imagens com Ctrl+V no campo de mensagem.
-- Ajustes de navegação e de layouts para janelas pequenas, escala ampliada e nomes longos.
-- Ao selecionar um canal de voz, a sala é exibida antes de entrar; a participação começa pelo botão **Entrar na voz**.
-- Recuperação de rascunhos e anexos preparados. Ao trocar de conversa durante a gravação de uma mensagem de voz, o áudio é preservado como rascunho local.
-- Correções na paginação do histórico, nas buscas e na correlação de respostas ao trocar de conversa ou host.
-
-## Confiabilidade e permissões
-
-- Correções na revogação de acesso, nas permissões e na proteção de anexos no host.
-- Melhorias na retomada de uploads, na limpeza de anexos e na gravação de downloads.
-- Correções no isolamento de credenciais por host, na persistência e na recuperação de dados.
-- Redução de trabalho na interface e na persistência; mixagem de áudio movida para fora do callback do dispositivo.
-- Banco SQLite atualizado para o esquema 5, com migração automática.
+- Redução do uso de CPU no envio UDP e melhorias nas verificações contra replay e na remontagem de pacotes.
+- Captura de tela evita bloquear enquanto cópias da GPU estão pendentes.
+- Correção da exibição de fotos de perfil nas salas de voz, nos participantes de chamadas e nas configurações da conta.
+- Avatares acompanham a alteração e remoção da foto de perfil, com fallback para imagens inválidas e durante o carregamento da câmera.
 
 O instalador preserva os dados e a identidade. A instalação encerra o aplicativo e qualquer host executado por ele; coordene a atualização com os participantes.
