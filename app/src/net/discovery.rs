@@ -31,7 +31,14 @@ impl Discovery {
         std::thread::Builder::new()
             .name("discovery".into())
             .spawn(move || {
-                let Ok(sock) = UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)) else {
+                // LANVOX_NO_DISCOVERY=1 limits discovery to this computer
+                // (no LAN listener, no firewall prompt); useful for dev/tests.
+                let bind_ip = if std::env::var_os("LANVOX_NO_DISCOVERY").is_some() {
+                    "127.0.0.1"
+                } else {
+                    "0.0.0.0"
+                };
+                let Ok(sock) = UdpSocket::bind((bind_ip, DISCOVERY_PORT)) else {
                     return;
                 };
                 let _ = sock.set_read_timeout(Some(Duration::from_secs(1)));

@@ -74,6 +74,9 @@ pub(super) fn start_listener_configured(
     options: ServerOptions,
 ) -> std::io::Result<ServerHandle> {
     let port = listener.local_addr()?.port();
+    // A host bound to loopback must not open sockets on other interfaces,
+    // otherwise the OS firewall prompts for every new executable.
+    let loopback_only = listener.local_addr()?.ip().is_loopback();
 
     let mut store = if let Some(path) = save_path
         .as_ref()
@@ -390,13 +393,16 @@ pub(super) fn start_listener_configured(
         std::thread::Builder::new()
             .name("server-announce".into())
             .spawn(move || {
-                let Ok(sock) = UdpSocket::bind(("0.0.0.0", 0)) else {
+                let bind_ip = if loopback_only { "127.0.0.1" } else { "0.0.0.0" };
+                let Ok(sock) = UdpSocket::bind((bind_ip, 0)) else {
                     return;
                 };
-                let _ = sock.set_broadcast(true);
+                let _ = sock.set_broadcast(!loopback_only);
                 let msg = format!("{DISCOVERY_MAGIC}|{port}|{name}");
                 while !stop.load(Ordering::SeqCst) {
-                    let _ = sock.send_to(msg.as_bytes(), ("255.255.255.255", DISCOVERY_PORT));
+                    if !loopback_only {
+                        let _ = sock.send_to(msg.as_bytes(), ("255.255.255.255", DISCOVERY_PORT));
+                    }
                     let _ = sock.send_to(msg.as_bytes(), ("127.0.0.1", DISCOVERY_PORT));
                     for _ in 0..40 {
                         if stop.load(Ordering::SeqCst) {

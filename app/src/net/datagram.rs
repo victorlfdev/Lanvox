@@ -643,10 +643,12 @@ pub fn connect(
     key: [u8; 32],
     dispatch: impl Fn(ServerMsg) + Send + 'static,
 ) -> io::Result<MediaSender> {
-    let bind = if address.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
+    // Loopback targets bind to loopback so no firewall prompt is triggered.
+    let bind = match (address.is_ipv4(), address.ip().is_loopback()) {
+        (true, true) => "127.0.0.1:0",
+        (true, false) => "0.0.0.0:0",
+        (false, true) => "[::1]:0",
+        (false, false) => "[::]:0",
     };
     let socket = Arc::new(UdpSocket::bind(bind)?);
     socket.set_read_timeout(Some(Duration::from_millis(100)))?;
