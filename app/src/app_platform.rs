@@ -139,6 +139,9 @@ impl LanvoxApp {
     }
 
     pub fn stage_invite(&mut self, invite: String) {
+        if self.startup_destination.is_some() {
+            self.cancel_connection();
+        }
         match crate::invites::parse(&invite) {
             Ok(_) => self.modal = Modal::JoinInvite { invite },
             Err(error) => self.notify(error),

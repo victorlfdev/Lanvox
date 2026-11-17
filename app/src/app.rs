@@ -110,6 +110,8 @@ pub struct VoiceNote {
 
 pub struct LanvoxApp {
     pub settings: Settings,
+    #[cfg(windows)]
+    pub windows_startup: Result<bool, String>,
     pub discovery: Option<Discovery>,
     pub hosted: Option<ServerHandle>,
     pub client: Option<Client>,
@@ -161,7 +163,8 @@ pub struct LanvoxApp {
     pub call_chat_open: bool,
     pub device_cache: Option<(Vec<String>, Vec<String>, Vec<String>)>,
     pub scroll_to_bottom: u8,
-    pub connection_pending: Option<Receiver<Result<Client, String>>>,
+    pub connection_pending: Option<Receiver<Result<Client, connection::ConnectionFailure>>>,
+    pub startup_destination: Option<crate::settings::StartupDestination>,
     pub reconnect_address: Option<String>,
     pub reconnect_at: Option<Instant>,
     pub reconnect_attempt: u32,
@@ -229,6 +232,12 @@ impl LanvoxApp {
         mixer.set_output_volume(settings.output_volume);
         let demo = screenshot.is_some();
         let mut app = Self {
+            #[cfg(windows)]
+            windows_startup: if demo {
+                Ok(false)
+            } else {
+                crate::startup::enabled().map_err(|e| e.to_string())
+            },
             host_input: if settings.host_name.is_empty() {
                 format!("Servidor de {}", settings.name)
             } else {
@@ -284,6 +293,7 @@ impl LanvoxApp {
             device_cache: None,
             scroll_to_bottom: 3,
             connection_pending: None,
+            startup_destination: None,
             reconnect_address: None,
             reconnect_at: None,
             reconnect_attempt: 0,
@@ -322,6 +332,9 @@ impl LanvoxApp {
             app.discovery = Some(Discovery::start(cc.egui_ctx.clone()));
             if let Some(invite) = std::env::args().find(|arg| crate::branding::is_link(arg)) {
                 app.stage_invite(invite);
+            } else if let Some(destination) = app.settings.startup_destination() {
+                app.startup_destination = Some(destination.clone());
+                app.connect(&cc.egui_ctx, destination.host);
             }
         }
         app
@@ -330,7 +343,27 @@ impl LanvoxApp {
     /// Demo rendering and headless interaction tests never write personal preferences.
     pub fn save_preferences(&self) {
         if !self.demo {
-            self.settings.save();
+            let mut settings = self.settings.clone();
+            if self.view.is_some() && self.client.as_ref().is_some_and(|c| c.is_alive()) {
+                settings.last_destination = Some(crate::settings::StartupDestination {
+                    host: self.current_host(),
+                    guild: self.guild,
+                });
+            }
+            settings.save();
+        }
+    }
+
+    pub fn remember_destination(&mut self) {
+        if self.view.is_some() && self.client.as_ref().is_some_and(|c| c.is_alive()) {
+            let destination = crate::settings::StartupDestination {
+                host: self.current_host(),
+                guild: self.guild,
+            };
+            if self.settings.last_destination.as_ref() != Some(&destination) {
+                self.settings.last_destination = Some(destination);
+                self.save_preferences();
+            }
         }
     }
 
@@ -472,6 +505,7 @@ impl LanvoxApp {
         self.poll_file_task(ctx);
         self.poll_connection(ctx);
         self.poll_network();
+        self.remember_destination();
         self.poll_background_hosts(ctx);
         let pause_voice_note = self.voice_note.as_ref().is_some_and(|note| {
             note.identity != self.local_identity

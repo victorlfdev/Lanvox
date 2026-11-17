@@ -145,10 +145,18 @@ pub(super) fn account_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
         &mut app.settings.notification_preview,
         "Mostrar conteúdo nas notificações",
     );
-    ui.checkbox(
-        &mut app.settings.auto_reconnect,
-        "Reconectar automaticamente",
-    );
+    if ui
+        .checkbox(
+            &mut app.settings.auto_reconnect,
+            "Reconectar automaticamente",
+        )
+        .changed()
+        && !app.settings.auto_reconnect
+        && app.reconnect_at.is_some()
+    {
+        app.cancel_connection();
+    }
+    startup_preferences(app, ui);
     if let Ok(fingerprint) = crate::notifications::identity_fingerprint() {
         ui.collapsing("Identidade base deste dispositivo", |ui| {
             ui.label("Guarde uma cópia privada para recuperar sua conta em outra instalação.");
@@ -340,6 +348,112 @@ pub(super) fn account_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
     }
     ui.add_space(16.0);
     update_section(app, ui);
+}
+
+fn startup_preferences(app: &mut LanvoxApp, ui: &mut egui::Ui) {
+    use crate::settings::{StartupConnection, StartupDestination};
+    ui.add_space(12.0);
+    ui.label(RichText::new("Inicialização").strong());
+    #[cfg(windows)]
+    {
+        let mut enabled = app.windows_startup.as_ref().copied().unwrap_or(false);
+        if ui
+            .add_enabled(
+                !app.demo,
+                egui::Checkbox::new(&mut enabled, "Iniciar com o Windows"),
+            )
+            .changed()
+        {
+            app.windows_startup = crate::startup::set_enabled(enabled)
+                .and_then(|()| crate::startup::enabled())
+                .map_err(|e| e.to_string());
+        }
+        if let Err(error) = &app.windows_startup {
+            ui.colored_label(
+                theme::color(theme::YELLOW),
+                format!("Não foi possível configurar a inicialização: {error}"),
+            );
+            if ui.small_button("Verificar novamente").clicked() && !app.demo {
+                app.windows_startup = crate::startup::enabled().map_err(|e| e.to_string());
+            }
+        }
+    }
+    let before = app.settings.startup_connection.clone();
+    let mut enabled = before != StartupConnection::Disabled;
+    if ui
+        .checkbox(&mut enabled, "Conectar automaticamente ao abrir")
+        .changed()
+    {
+        app.settings.startup_connection = if enabled {
+            StartupConnection::LastConnected
+        } else {
+            StartupConnection::Disabled
+        };
+        if !enabled && app.startup_destination.is_some() {
+            app.cancel_connection();
+        }
+    }
+    if enabled {
+        let mut selected = match &app.settings.startup_connection {
+            StartupConnection::Community(destination) => {
+                format!("Comunidade salva · {}", destination.host)
+            }
+            _ => "Última comunidade conectada".into(),
+        };
+        let mut destinations = Vec::new();
+        if let Some(view) = &app.view {
+            for guild in &view.guilds {
+                destinations.push((
+                    StartupDestination {
+                        host: app.current_host(),
+                        guild: Some(guild.id),
+                    },
+                    guild.name.clone(),
+                ));
+            }
+        }
+        for host in &app.background_hosts {
+            for guild in &host.view.guilds {
+                destinations.push((
+                    StartupDestination {
+                        host: host.address.clone(),
+                        guild: Some(guild.id),
+                    },
+                    guild.name.clone(),
+                ));
+            }
+        }
+        if let StartupConnection::Community(chosen) = &app.settings.startup_connection {
+            if let Some((_, name)) = destinations
+                .iter()
+                .find(|(destination, _)| destination == chosen)
+            {
+                selected = format!("{name} · {}", chosen.host);
+            }
+        }
+        egui::ComboBox::from_id_salt("startup-community")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut app.settings.startup_connection,
+                    StartupConnection::LastConnected,
+                    "Última comunidade conectada",
+                );
+                for (destination, name) in destinations {
+                    let label = format!("{name} · {}", destination.host);
+                    ui.selectable_value(
+                        &mut app.settings.startup_connection,
+                        StartupConnection::Community(destination),
+                        label,
+                    );
+                }
+            });
+        ui.label(RichText::new("Conecte-se a uma comunidade para escolhê-la aqui. Voz, microfone e câmera permanecem desligados ao abrir.").small().color(theme::color(theme::TEXT_MUTED)));
+    }
+    if app.settings.startup_connection != before {
+        app.save_preferences();
+    }
+    ui.add_space(12.0);
 }
 
 /// Signed updates from GitHub Releases, with an opt-out for automatic updates.

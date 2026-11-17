@@ -1,11 +1,41 @@
 use super::*;
 
+pub struct ConnectionFailure {
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl ConnectionFailure {
+    fn from_io(address: &str, error: std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        let retryable = matches!(
+            error.kind(),
+            ErrorKind::ConnectionRefused
+                | ErrorKind::ConnectionReset
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::NotConnected
+                | ErrorKind::TimedOut
+                | ErrorKind::WouldBlock
+                | ErrorKind::Interrupted
+                | ErrorKind::AddrNotAvailable
+                | ErrorKind::NetworkUnreachable
+                | ErrorKind::HostUnreachable
+                | ErrorKind::NotFound
+        );
+        Self {
+            message: format!("Não foi possível entrar em {address}: {error}"),
+            retryable,
+        }
+    }
+}
+
 impl LanvoxApp {
     pub fn connect(&mut self, ctx: &egui::Context, address: String) -> bool {
         self.connect_using(ctx, address, None)
     }
 
     pub fn connect_from_form(&mut self, ctx: &egui::Context, address: String) -> bool {
+        self.cancel_connection();
         let supplied = crate::settings::HostCredentials {
             access_token: self.settings.access_token.clone(),
             expected_fingerprint: self.settings.expected_host.clone(),
@@ -55,6 +85,13 @@ impl LanvoxApp {
             address
         };
         let address = crate::settings::host_address(&address);
+        if self
+            .startup_destination
+            .as_ref()
+            .is_some_and(|destination| destination.host != address)
+        {
+            self.startup_destination = None;
+        }
         if self.client.as_ref().is_some_and(|client| {
             client.is_alive() && crate::settings::host_address(&client.address) == address
         }) {
@@ -121,7 +158,7 @@ impl LanvoxApp {
                     decoder,
                     options,
                 )
-                .map_err(|e| format!("Não foi possível entrar em {address}: {e}"));
+                .map_err(|e| ConnectionFailure::from_io(&address, e));
                 let _ = tx.send(result);
                 ctx.request_repaint();
             });
@@ -140,6 +177,7 @@ impl LanvoxApp {
         self.reconnect_at = None;
         self.reconnect_address = None;
         self.connection_status.clear();
+        self.startup_destination = None;
         if self.new_host_pending {
             self.hosted = None;
             self.new_host_pending = false;
@@ -152,9 +190,12 @@ impl LanvoxApp {
                 .as_ref()
                 .and_then(|receiver| match receiver.try_recv() {
                     Ok(result) => Some(result),
-                    Err(crossbeam_channel::TryRecvError::Disconnected) => Some(Err(
-                        "A tarefa de conexão foi encerrada. Tente novamente.".into(),
-                    )),
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        Some(Err(ConnectionFailure {
+                            message: "A tarefa de conexão foi encerrada. Tente novamente.".into(),
+                            retryable: false,
+                        }))
+                    }
                     Err(crossbeam_channel::TryRecvError::Empty) => None,
                 });
         if let Some(result) = result {
@@ -185,15 +226,19 @@ impl LanvoxApp {
                 }
                 Err(error) => {
                     self.connecting = false;
-                    self.join_error = Some(error.clone());
+                    self.join_error = Some(error.message.clone());
                     if self.new_host_pending {
                         self.hosted = None;
                         self.new_host_pending = false;
-                        self.host_error = Some(error);
+                        self.host_error = Some(error.message);
                     }
-                    if self.view.is_some() && self.settings.auto_reconnect {
+                    if error.retryable
+                        && (self.view.is_some() || self.startup_destination.is_some())
+                        && self.settings.auto_reconnect
+                    {
                         self.schedule_reconnect();
                     } else {
+                        self.startup_destination = None;
                         self.connection_status = "Falha na conexão".into();
                     }
                 }
@@ -241,6 +286,7 @@ impl LanvoxApp {
     }
 
     pub fn disconnect(&mut self) {
+        self.remember_destination();
         self.preserve_voice_note();
         self.save_drafts();
         self.cancel_connection();
@@ -278,7 +324,14 @@ impl LanvoxApp {
                     self.connecting = false;
                     self.reconnect_attempt = 0;
                     self.connection_status.clear();
+                    let restore_channel =
+                        self.startup_destination.is_some() || self.selected.is_none();
                     let view = ServerView::from_snapshot(you, snapshot);
+                    if let Some(destination) = self.startup_destination.take() {
+                        self.guild = destination
+                            .guild
+                            .filter(|id| view.guilds.iter().any(|g| g.id == *id));
+                    }
                     if self.guild.is_none() {
                         self.guild = view.guilds.first().map(|g| g.id);
                     }
@@ -291,6 +344,17 @@ impl LanvoxApp {
                     }
                     self.view = Some(view);
                     self.recover_identity_namespace(you);
+                    if restore_channel && !self.home {
+                        if let Some(guild) = self.guild {
+                            self.selected =
+                                crate::ui::quick_switcher::channel_for_guild(self, guild);
+                        }
+                    }
+                    self.settings.last_destination = Some(crate::settings::StartupDestination {
+                        host: self.current_host(),
+                        guild: self.guild,
+                    });
+                    self.save_preferences();
                     self.restore_drafts();
                     self.scroll_to_bottom = 3;
                     self.replay_pending();
@@ -424,5 +488,59 @@ impl LanvoxApp {
             }
         }
         self.restore_attachment_drafts();
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn startup_retries_network_failures_without_an_existing_session_and_can_be_cancelled() {
+        let (mut app, ctx) = crate::app::ui_regressions::fixture();
+        app.view = None;
+        app.startup_destination = Some(crate::settings::StartupDestination {
+            host: "offline:47800".into(),
+            guild: Some(7),
+        });
+        app.reconnect_address = Some("offline:47800".into());
+        let (tx, rx) = bounded(1);
+        app.connection_pending = Some(rx);
+        tx.send(Err(ConnectionFailure::from_io(
+            "offline",
+            std::io::ErrorKind::ConnectionRefused.into(),
+        )))
+        .ok();
+        app.poll_connection(&ctx);
+        assert!(app.reconnect_at.is_some());
+        app.cancel_connection();
+        assert!(app.reconnect_at.is_none());
+        assert!(app.startup_destination.is_none());
+        assert!(app.reconnect_address.is_none());
+    }
+
+    #[test]
+    fn startup_stops_on_authentication_errors_or_when_reconnection_is_disabled() {
+        for (kind, reconnect) in [
+            (std::io::ErrorKind::PermissionDenied, true),
+            (std::io::ErrorKind::InvalidData, true),
+            (std::io::ErrorKind::TimedOut, false),
+        ] {
+            let (mut app, ctx) = crate::app::ui_regressions::fixture();
+            app.view = None;
+            app.settings.auto_reconnect = reconnect;
+            app.startup_destination = Some(crate::settings::StartupDestination {
+                host: "host:47800".into(),
+                guild: None,
+            });
+            let (tx, rx) = bounded(1);
+            app.connection_pending = Some(rx);
+            tx.send(Err(ConnectionFailure::from_io("host", kind.into())))
+                .ok();
+            app.poll_connection(&ctx);
+            assert!(app.reconnect_at.is_none());
+            assert!(app.startup_destination.is_none());
+            assert!(app.join_error.is_some());
+        }
     }
 }

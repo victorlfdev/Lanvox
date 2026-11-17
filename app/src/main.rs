@@ -40,6 +40,8 @@ mod settings;
 #[cfg(feature = "gui")]
 mod sfx;
 #[cfg(feature = "gui")]
+mod startup;
+#[cfg(feature = "gui")]
 mod state;
 mod storage;
 #[cfg(feature = "gui")]
@@ -87,6 +89,35 @@ fn main() -> eframe::Result<()> {
         .position(|a| a == "--screenshot")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
+
+    #[cfg(windows)]
+    let _instance = if screenshot.is_none() {
+        match startup::DesktopInstance::acquire() {
+            Ok(Some(instance)) => Some(instance),
+            Ok(None) => {
+                // The owning process may still be creating its tray window.
+                for _ in 0..40 {
+                    let delivered =
+                        if let Some(invite) = args.iter().find(|arg| branding::is_link(arg)) {
+                            notifications::forward_invite(invite)
+                        } else {
+                            notifications::forward_open()
+                        };
+                    if delivered {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!("Não foi possível verificar a instância do Lanvox: {error}");
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
 
     let screenshot_size = args
         .iter()

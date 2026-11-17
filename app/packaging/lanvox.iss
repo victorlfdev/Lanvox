@@ -42,6 +42,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Criar atalho na área de trabalho"; Flags: unchecked
+Name: "autostart"; Description: "Iniciar Lanvox com o Windows"; Check: not IsLanvoxUpdate
 
 [Files]
 Source: "{#SourceBinary}"; DestDir: "{app}"; Flags: ignoreversion
@@ -53,6 +54,7 @@ Name: "{group}\Lanvox"; Filename: "{app}\lanvox.exe"
 Name: "{autodesktop}\Lanvox"; Filename: "{app}\lanvox.exe"; Tasks: desktopicon
 
 [Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Lanvox"; ValueData: """{app}\lanvox.exe"" --autostart"; Tasks: autostart; Flags: uninsdeletevalue; Check: not IsLanvoxUpdate
 Root: HKCU; Subkey: "Software\Classes\lanvox"; ValueType: string; ValueName: ""; ValueData: "URL:Lanvox invitation"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\lanvox"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\lanvox\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\lanvox.exe,0"
@@ -75,4 +77,10 @@ Root: HKCU; Subkey: "Software\Classes\huddle\shell\open\command"; ValueType: str
 function IsLanvoxUpdate: Boolean;
 begin
   Result := ExpandConstant('{param:LANVOXUPDATE|0}') = '1';
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Lanvox');
 end;

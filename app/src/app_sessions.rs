@@ -169,7 +169,7 @@ impl LanvoxApp {
         if self.current_host() == address && self.client.as_ref().is_some_and(|c| c.is_alive()) {
             return;
         }
-        if self.connection_pending.is_some() {
+        if self.connection_pending.is_some() || self.reconnect_at.is_some() {
             self.cancel_connection();
         }
         if !self.activate_host(&address, ctx) {

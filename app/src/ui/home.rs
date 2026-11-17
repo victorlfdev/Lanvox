@@ -22,7 +22,7 @@ pub fn show(app: &mut LanvoxApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui|{
      if ui.add_enabled(!app.connecting&&!app.join_input.trim().is_empty(),egui::Button::new("Entrar")).clicked()||(address.lost_focus()&&ui.input(|i|i.key_pressed(egui::Key::Enter))){join=Some(app.join_input.trim().to_owned());}
      if ui.add_enabled(!app.join_input.trim().is_empty(), egui::Button::new("Salvar favorito")).clicked(){let value=crate::settings::host_address(&app.join_input);if !app.settings.favorites.contains(&value){app.settings.favorites.push(value);app.save_preferences();}}
-     if app.connecting{ui.spinner();ui.label(&app.connection_status);if ui.button("Cancelar").clicked(){app.cancel_connection();}}
+     if app.connecting || app.reconnect_at.is_some(){ui.spinner();ui.label(&app.connection_status);if ui.button("Cancelar").clicked(){app.cancel_connection();}}
     });
     ui.collapsing("Detalhes de privacidade", |ui| { ui.label(crate::branding::ADMIN_VISIBILITY_NOTICE); });
     ui.collapsing("Conexão manual e verificação de identidade",|ui|{

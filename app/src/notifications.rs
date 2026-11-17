@@ -89,6 +89,11 @@ pub fn shutdown() {
     native::shutdown();
 }
 
+#[cfg(windows)]
+pub fn forward_open() -> bool {
+    native::forward_open()
+}
+
 pub fn network_addresses() -> Vec<(String, std::net::IpAddr)> {
     let mut addresses: Vec<_> = if_addrs::get_if_addrs()
         .unwrap_or_default()
@@ -212,9 +217,17 @@ mod native {
     static WINDOW: AtomicIsize = AtomicIsize::new(0);
     const CALLBACK: u32 = WM_APP + 41;
     const REBIND: u32 = WM_APP + 42;
+    const OPEN: u32 = WM_APP + 43;
     const HOTKEY_MUTE: i32 = 101;
     const HOTKEY_DEAFEN: i32 = 102;
     const INVITE_COPY_DATA: usize = 0x48445534;
+
+    pub(super) fn forward_open() -> bool {
+        unsafe {
+            let window = FindWindowW(wide("LanvoxNotificationWindow").as_ptr(), std::ptr::null());
+            !window.is_null() && PostMessageW(window, OPEN, 0, 0) != 0
+        }
+    }
 
     pub(super) fn forward_invite(invite: &str) -> bool {
         if crate::invites::parse(invite).is_err() {
@@ -332,6 +345,10 @@ mod native {
         lparam: LPARAM,
     ) -> LRESULT {
         match message {
+            OPEN => {
+                send(DesktopAction::Open);
+                0
+            }
             WM_COPYDATA => {
                 if lparam == 0 {
                     return 0;

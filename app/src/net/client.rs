@@ -82,7 +82,15 @@ fn authenticate(
             let mut connection = None;
             let mut connect_error =
                 std::io::Error::new(std::io::ErrorKind::NotFound, "Endereço não encontrado");
-            for endpoint in address.to_socket_addrs()?.take(8) {
+            let endpoints = address.to_socket_addrs().map_err(|error| {
+                if error.kind() == std::io::ErrorKind::InvalidInput {
+                    error
+                } else {
+                    // DNS/VPN may not be available yet during Windows login.
+                    std::io::Error::new(std::io::ErrorKind::HostUnreachable, error)
+                }
+            })?;
+            for endpoint in endpoints.take(8) {
                 match TcpStream::connect_timeout(&endpoint, Duration::from_secs(4)) {
                     Ok(stream) => {
                         connection = Some(stream);

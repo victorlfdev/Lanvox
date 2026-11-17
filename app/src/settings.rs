@@ -8,6 +8,20 @@ use serde::{Deserialize, Serialize};
 use crate::media::audio::InputMode;
 use crate::media::screen::StreamSettings;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartupDestination {
+    pub host: String,
+    pub guild: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StartupConnection {
+    Disabled,
+    #[default]
+    LastConnected,
+    Community(StartupDestination),
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NotificationLevel {
     #[default]
@@ -264,6 +278,8 @@ pub struct Settings {
     pub camera: crate::media::camera::CameraSettings,
     pub stream: StreamSettings,
     pub last_address: String,
+    pub startup_connection: StartupConnection,
+    pub last_destination: Option<StartupDestination>,
     pub host_name: String,
     pub favorites: Vec<String>,
     pub hosts: HashMap<String, HostCredentials>,
@@ -343,6 +359,8 @@ impl Default for Settings {
             camera: Default::default(),
             stream: StreamSettings::default(),
             last_address: String::new(),
+            startup_connection: StartupConnection::default(),
+            last_destination: None,
             host_name: String::new(),
             favorites: Vec::new(),
             hosts: HashMap::new(),
@@ -443,6 +461,23 @@ fn preference_worker() -> &'static crossbeam_channel::Sender<()> {
 }
 
 impl Settings {
+    pub fn startup_destination(&self) -> Option<StartupDestination> {
+        let mut destination = match &self.startup_connection {
+            StartupConnection::Disabled => return None,
+            StartupConnection::Community(destination) => destination.clone(),
+            StartupConnection::LastConnected => {
+                self.last_destination
+                    .clone()
+                    .unwrap_or_else(|| StartupDestination {
+                        host: self.last_address.clone(),
+                        guild: None,
+                    })
+            }
+        };
+        destination.host = host_address(&destination.host);
+        (!destination.host.is_empty()).then_some(destination)
+    }
+
     pub fn draft_is_queued(&self, identity: &str, host: &str, operation: &str) -> bool {
         self.pending.iter().any(|pending| {
             pending.identity == identity
@@ -574,6 +609,42 @@ fn rekey_preferences<T: Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn startup_migrates_legacy_settings_without_invite_secrets() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"last_address":"lanvox://Friends?token=secret"}"#).unwrap();
+        assert_eq!(
+            settings.startup_destination(),
+            Some(StartupDestination {
+                host: "friends:47800".into(),
+                guild: None
+            })
+        );
+        assert!(Settings::default().startup_destination().is_none());
+    }
+
+    #[test]
+    fn startup_pinned_destination_is_independent_of_the_last_connection() {
+        let pinned = StartupDestination {
+            host: "friends:47800".into(),
+            guild: Some(7),
+        };
+        let mut settings = Settings {
+            startup_connection: StartupConnection::Community(pinned.clone()),
+            last_destination: Some(StartupDestination {
+                host: "other:47800".into(),
+                guild: Some(9),
+            }),
+            ..Default::default()
+        };
+        let reloaded: Settings =
+            serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert_eq!(reloaded.startup_destination(), Some(pinned));
+        settings.startup_connection = StartupConnection::LastConnected;
+        assert_eq!(settings.startup_destination(), settings.last_destination);
+        settings.startup_connection = StartupConnection::Disabled;
+        assert!(settings.startup_destination().is_none());
+    }
     #[test]
     fn favorite_scope_is_canonical_and_never_contains_invite_secrets() {
         assert_eq!(host_address("FRIENDS"), "friends:47800");

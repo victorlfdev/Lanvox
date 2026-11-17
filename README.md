@@ -30,6 +30,10 @@ Para hospedar pelo desktop, selecione a interface que aceitará conexões e inic
 
 ### Experiência desktop
 
+Em **Preferências › Minha conta › Inicialização**, escolha conectar à última comunidade (padrão), fixar uma comunidade de uma sessão aberta ou desativar a conexão na abertura. O último canal acessível é restaurado; voz, microfone e câmera não são ativados automaticamente. Falhas temporárias de rede permitem novas tentativas com intervalo progressivo quando **Reconectar automaticamente** está ligado; **Cancelar** interrompe essas tentativas.
+
+No Windows, **Iniciar com o Windows** registra o aplicativo no login do usuário atual, sem exigir administrador. A opção também está disponível no instalador, ativada por padrão em novas instalações. Atualizações automáticas preservam o registro e a desinstalação o remove. A configuração do Windows pode desabilitar a execução no login independentemente do registro do aplicativo.
+
 - Busca indexada com filtros, ordenação, paginação e contexto; painéis de fixados e caixa de entrada.
 - Histórico contínuo, datas, não lidas, posição de leitura e seletor rápido `Ctrl+K`.
 - Prévia de anexos, arrastar arquivos, colar imagens, galeria com zoom e áudio/vídeo no Windows.
