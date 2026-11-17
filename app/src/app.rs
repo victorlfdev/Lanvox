@@ -315,7 +315,7 @@ impl LanvoxApp {
             desktop_events: if demo {
                 std::sync::mpsc::channel().1
             } else {
-                crate::notifications::start()
+                crate::notifications::start(cc.egui_ctx.clone())
             },
             local_identity,
             sfx_watch: Default::default(),
@@ -480,11 +480,12 @@ impl LanvoxApp {
         }
         // Configurable shortcuts while the window has focus (global ones arrive as desktop actions).
         let (mute_key, deafen_key) = (self.settings.mute_hotkey, self.settings.deafen_hotkey);
+        let (mute_global, deafen_global) = crate::notifications::hotkey_status();
         if !matches!(self.modal, Modal::Settings(_)) {
-            if ctx.input(|i| mute_key.pressed(i)) {
+            if !mute_global && ctx.input(|i| mute_key.pressed(i)) {
                 self.toggle_mute();
             }
-            if ctx.input(|i| deafen_key.pressed(i)) {
+            if !deafen_global && ctx.input(|i| deafen_key.pressed(i)) {
                 self.toggle_deafen();
             }
         }

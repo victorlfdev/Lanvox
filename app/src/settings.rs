@@ -223,6 +223,12 @@ impl Hotkey {
         }
         parts.push(match self.vk {
             0x30..=0x39 | 0x41..=0x5A => (self.vk as u8 as char).to_string(),
+            0xA0 => "Shift Esquerdo".into(),
+            0xA1 => "Shift Direito".into(),
+            0xA2 => "Ctrl Esquerdo".into(),
+            0xA3 => "Ctrl Direito".into(),
+            0xA4 => "Alt Esquerdo".into(),
+            0xA5 => "Alt Direito".into(),
             0x70..=0x87 => format!("F{}", self.vk - 0x6F),
             _ => format!("0x{:02X}", self.vk),
         });

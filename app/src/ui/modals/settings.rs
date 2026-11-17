@@ -36,6 +36,8 @@ pub(super) fn settings(app: &mut LanvoxApp, ctx: &egui::Context, tab: SettingsTa
         },
     );
     if result.cancelled() || new_tab != tab {
+        ctx.data_mut(|d| d.remove::<usize>(recording_id()));
+        crate::notifications::set_hotkeys(app.settings.mute_hotkey, app.settings.deafen_hotkey);
         app.audio_shared.mic_test.store(false, Ordering::Relaxed);
         if app
             .view

@@ -266,70 +266,83 @@ pub(super) fn hotkey_row(app: &mut LanvoxApp, ui: &mut egui::Ui, slot: usize, ti
     };
     ui.horizontal_wrapped(|ui| {
         ui.label(title);
-        let text = if active { "Pressione as teclas…".to_string() } else { current.label() };
-        if ui.add_sized([170.0, 26.0], egui::Button::new(text).selected(active)).clicked() {
+        let text = if active {
+            "Pressione as teclas…".to_string()
+        } else {
+            current.label()
+        };
+        if ui
+            .add_sized([170.0, 26.0], egui::Button::new(text).selected(active))
+            .clicked()
+        {
             if active {
                 ui.data_mut(|d| d.remove::<usize>(recording_id()));
-                crate::notifications::set_hotkeys(app.settings.mute_hotkey, app.settings.deafen_hotkey);
+                crate::notifications::set_hotkeys(
+                    app.settings.mute_hotkey,
+                    app.settings.deafen_hotkey,
+                );
             } else {
                 ui.data_mut(|d| d.insert_temp(recording_id(), slot));
                 // Release global shortcuts so the combination reaches this window.
                 crate::notifications::set_hotkeys(Hotkey::none(), Hotkey::none());
+                #[cfg(windows)]
+                crate::notifications::record_hotkey(true);
             }
         }
         if ui.button("Remover").clicked() {
-            if slot == 0 { app.settings.mute_hotkey = Hotkey::none() } else { app.settings.deafen_hotkey = Hotkey::none() }
+            if slot == 0 {
+                app.settings.mute_hotkey = Hotkey::none()
+            } else {
+                app.settings.deafen_hotkey = Hotkey::none()
+            }
             ui.data_mut(|d| d.remove::<usize>(recording_id()));
             crate::notifications::set_hotkeys(app.settings.mute_hotkey, app.settings.deafen_hotkey);
         }
-        if !active && current.is_set() && cfg!(windows) && !registered {
+        if recording.is_none() && current.is_set() && cfg!(windows) && !registered {
             ui.label(
-                RichText::new("Indisponível em segundo plano (combinação em uso). Funciona com o app em foco.")
+                RichText::new("Captura global indisponível. Reinicie o app para tentar novamente.")
                     .size(12.0)
                     .color(theme::color(theme::TEXT_FAINT)),
             );
         }
     });
     if active {
+        #[cfg(windows)]
+        let captured = crate::notifications::take_recorded_hotkey();
+        #[cfg(not(windows))]
         let captured = ui.input(|i| {
             i.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key: egui::Key::Escape,
+                    pressed: true,
+                    ..
+                } => Some(Hotkey::none()),
                 egui::Event::Key {
                     key,
                     pressed: true,
                     modifiers,
                     ..
-                } => Some((*key, *modifiers)),
+                } => {
+                    let vk = Hotkey::vk_for_key(*key)?;
+                    ((0x70..=0x87).contains(&vk) || modifiers.ctrl || modifiers.alt)
+                        .then(|| Hotkey::new(modifiers.ctrl, modifiers.shift, modifiers.alt, vk))
+                }
                 _ => None,
             })
         });
-        if let Some((key, modifiers)) = captured {
-            let cancel = key == egui::Key::Escape;
-            if let Some(vk) = Hotkey::vk_for_key(key) {
-                let is_function = (0x70..=0x87).contains(&vk);
-                if !cancel && (modifiers.ctrl || modifiers.alt || is_function) {
-                    let hotkey = Hotkey::new(modifiers.ctrl, modifiers.shift, modifiers.alt, vk);
-                    if slot == 0 {
-                        app.settings.mute_hotkey = hotkey
-                    } else {
-                        app.settings.deafen_hotkey = hotkey
-                    }
-                    ui.data_mut(|d| d.remove::<usize>(recording_id()));
-                    crate::notifications::set_hotkeys(
-                        app.settings.mute_hotkey,
-                        app.settings.deafen_hotkey,
-                    );
+        if let Some(hotkey) = captured {
+            if hotkey.is_set() {
+                if slot == 0 {
+                    app.settings.mute_hotkey = hotkey;
+                } else {
+                    app.settings.deafen_hotkey = hotkey;
                 }
             }
-            if cancel {
-                ui.data_mut(|d| d.remove::<usize>(recording_id()));
-                crate::notifications::set_hotkeys(
-                    app.settings.mute_hotkey,
-                    app.settings.deafen_hotkey,
-                );
-            }
+            ui.data_mut(|d| d.remove::<usize>(recording_id()));
+            crate::notifications::set_hotkeys(app.settings.mute_hotkey, app.settings.deafen_hotkey);
         }
         ui.label(
-            RichText::new("Use Ctrl ou Alt com uma tecla (ou uma tecla F). Esc cancela.")
+            RichText::new("Use Ctrl/Alt com uma tecla, uma tecla F ou pressione e solte Ctrl, Alt ou Shift (esquerdo ou direito). Esc cancela.")
                 .size(12.0)
                 .color(theme::color(theme::TEXT_FAINT)),
         );

@@ -19,12 +19,15 @@ pub enum DesktopAction {
     Exit,
 }
 
-pub fn start() -> Receiver<DesktopAction> {
+#[cfg(windows)]
+mod keyboard;
+
+pub fn start(ctx: egui::Context) -> Receiver<DesktopAction> {
     let (tx, rx) = mpsc::channel();
     #[cfg(windows)]
-    native::start(tx);
+    native::start(tx, ctx);
     #[cfg(not(windows))]
-    drop(tx);
+    drop((tx, ctx));
     rx
 }
 
@@ -32,7 +35,10 @@ pub fn start() -> Receiver<DesktopAction> {
 /// Returns nothing; use `hotkey_status` to learn whether each one was accepted.
 pub fn set_hotkeys(mute: crate::settings::Hotkey, deafen: crate::settings::Hotkey) {
     #[cfg(windows)]
-    native::set_hotkeys(mute, deafen);
+    {
+        keyboard::record(false);
+        native::set_hotkeys(mute, deafen);
+    }
     #[cfg(not(windows))]
     let _ = (mute, deafen);
 }
@@ -43,6 +49,17 @@ pub fn hotkey_status() -> (bool, bool) {
     return native::hotkey_status();
     #[cfg(not(windows))]
     (false, false)
+}
+
+/// Native capture preserves the side of standalone modifier keys.
+#[cfg(windows)]
+pub fn record_hotkey(active: bool) {
+    keyboard::record(active);
+}
+
+#[cfg(windows)]
+pub fn take_recorded_hotkey() -> Option<crate::settings::Hotkey> {
+    keyboard::take_recorded()
 }
 
 pub fn notify(title: &str, body: &str) {
@@ -203,9 +220,6 @@ mod native {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
     use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
-    };
     use windows_sys::Win32::UI::Shell::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -216,10 +230,7 @@ mod native {
     static ACTIVE: Mutex<Option<(std::time::Instant, Option<MessageTarget>)>> = Mutex::new(None);
     static WINDOW: AtomicIsize = AtomicIsize::new(0);
     const CALLBACK: u32 = WM_APP + 41;
-    const REBIND: u32 = WM_APP + 42;
     const OPEN: u32 = WM_APP + 43;
-    const HOTKEY_MUTE: i32 = 101;
-    const HOTKEY_DEAFEN: i32 = 102;
     const INVITE_COPY_DATA: usize = 0x48445534;
 
     pub(super) fn forward_open() -> bool {
@@ -257,52 +268,12 @@ mod native {
                 && result == 1
         }
     }
-    static WANTED: Mutex<[crate::settings::Hotkey; 2]> =
-        Mutex::new([crate::settings::Hotkey::none(); 2]);
-    static REGISTERED: Mutex<(bool, bool)> = Mutex::new((false, false));
-
     pub(super) fn hotkey_status() -> (bool, bool) {
-        REGISTERED.lock().map(|r| *r).unwrap_or((false, false))
+        super::keyboard::status()
     }
 
     pub(super) fn set_hotkeys(mute: crate::settings::Hotkey, deafen: crate::settings::Hotkey) {
-        if let Ok(mut wanted) = WANTED.lock() {
-            *wanted = [mute, deafen];
-        }
-        let window = WINDOW.load(Ordering::SeqCst);
-        if window != 0 {
-            // Hotkeys belong to the thread that owns the window.
-            unsafe { PostMessageW(window as HWND, REBIND, 0, 0) };
-        }
-    }
-
-    fn register(window: HWND, id: i32, key: crate::settings::Hotkey) -> bool {
-        unsafe {
-            UnregisterHotKey(window, id);
-            if !key.is_set() {
-                return false;
-            }
-            let mut modifiers = MOD_NOREPEAT;
-            if key.ctrl {
-                modifiers |= MOD_CONTROL;
-            }
-            if key.shift {
-                modifiers |= MOD_SHIFT;
-            }
-            if key.alt {
-                modifiers |= MOD_ALT;
-            }
-            RegisterHotKey(window, id, modifiers, key.vk) != 0
-        }
-    }
-
-    fn apply_hotkeys(window: HWND) {
-        let wanted = WANTED.lock().map(|w| *w).unwrap_or_default();
-        let mute = register(window, HOTKEY_MUTE, wanted[0]);
-        let deafen = register(window, HOTKEY_DEAFEN, wanted[1]);
-        if let Ok(mut status) = REGISTERED.lock() {
-            *status = (mute, deafen);
-        }
+        super::keyboard::set_hotkeys([mute, deafen]);
     }
 
     fn wide(value: &str) -> Vec<u16> {
@@ -332,9 +303,14 @@ mod native {
         }
     }
 
-    fn send(action: DesktopAction) {
+    static REPAINT: OnceLock<egui::Context> = OnceLock::new();
+
+    pub(super) fn send(action: DesktopAction) {
         if let Some(tx) = ACTIONS.get() {
             let _ = tx.send(action);
+            if let Some(ctx) = REPAINT.get() {
+                ctx.request_repaint();
+            }
         }
     }
 
@@ -438,18 +414,6 @@ mod native {
                 }
                 0
             }
-            REBIND => {
-                apply_hotkeys(window);
-                0
-            }
-            WM_HOTKEY => {
-                match wparam as i32 {
-                    HOTKEY_MUTE => send(DesktopAction::ToggleMute),
-                    HOTKEY_DEAFEN => send(DesktopAction::ToggleDeafen),
-                    _ => {}
-                }
-                0
-            }
             WM_TIMER => {
                 if let Ok(mut active) = ACTIVE.lock() {
                     if active
@@ -485,7 +449,8 @@ mod native {
         }
     }
 
-    pub(super) fn start(tx: Sender<DesktopAction>) {
+    pub(super) fn start(tx: Sender<DesktopAction>, ctx: egui::Context) {
+        let _ = REPAINT.set(ctx);
         if ACTIONS.set(tx).is_err() {
             return;
         }
@@ -521,7 +486,7 @@ mod native {
                     return;
                 }
                 WINDOW.store(window as isize, Ordering::SeqCst);
-                apply_hotkeys(window);
+                let keyboard_hook = super::keyboard::install();
                 let mut data = icon_data(window);
                 data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
                 data.uCallbackMessage = CALLBACK;
@@ -534,6 +499,7 @@ mod native {
                     TranslateMessage(&message);
                     DispatchMessageW(&message);
                 }
+                super::keyboard::uninstall(keyboard_hook);
                 WINDOW.store(0, Ordering::SeqCst);
             });
     }
