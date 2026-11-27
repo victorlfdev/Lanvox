@@ -270,8 +270,10 @@ impl LanvoxApp {
         );
     }
 
-    pub fn stream_stats(&self, key: StreamKey) -> Option<(u32, u32, f32, f32)> {
-        self.pictures
-            .with(|map| map.get(&key).map(|p| (p.width, p.height, p.fps, p.kbps)))
+    pub fn stream_stats(&self, key: StreamKey) -> Option<(u32, u32, f32, f32, f32, f32)> {
+        self.pictures.with(|map| {
+            map.get(&key)
+                .map(|p| (p.width, p.height, p.fps, p.kbps, p.decode_ms, p.queue_ms))
+        })
     }
 }

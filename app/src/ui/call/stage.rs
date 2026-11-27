@@ -122,24 +122,25 @@ pub fn stream_stage(app: &mut LanvoxApp, ui: &mut egui::Ui, key: StreamKey, full
                 )
             })
             .unwrap_or_default();
-        let viewers = app
-            .view
-            .as_ref()
-            .and_then(|v| v.viewers.get(&StreamKind::Screen))
-            .copied()
-            .unwrap_or(0);
         format!(
-            "{source} · {preset} preset · {}x{} · {:.0} fps · {:.1} Mb/s · quality {} · {} watching",
+            "{source} · {preset} preset · {}x{} · evento {} cap {:.0} enc {:.0} out {:.0} fps · mapa {}/s · {:.1} Mb/s",
             s.width,
             s.height,
+            s.capture_events,
+            s.capture_fps,
+            s.encoded_fps,
             s.fps,
+            s.capture_busy,
             s.kbps / 1000.0,
-            s.quality,
-            viewers
         )
     } else {
         app.stream_stats(key)
-            .map(|(w, h, fps, kbps)| format!("{w}x{h} · {fps:.0} fps · {:.1} Mb/s", kbps / 1000.0))
+            .map(|(w, h, fps, kbps, decode_ms, queue_ms)| {
+                format!(
+                    "{w}x{h} · {fps:.0} fps · {:.1} Mb/s · dec {decode_ms:.1} ms · queue {queue_ms:.1} ms",
+                    kbps / 1000.0
+                )
+            })
             .unwrap_or_default()
     };
     painter.text(

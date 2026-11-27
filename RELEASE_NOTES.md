@@ -1,3 +1,14 @@
+# Lanvox 0.3.2
+
+## Compartilhamento de tela
+
+- Ajustes na captura, conversão de pixels e codificação H.264 para reduzir o custo do compartilhamento de tela.
+- Cadência de captura e pré-visualização alinhadas à taxa solicitada, incluindo 60 FPS.
+- Adaptação de resolução mais gradual quando a máquina não consegue acompanhar a codificação.
+- Melhorias na leitura de quadros do Windows Graphics Capture e nas métricas de captura e codificação.
+
+Esta atualização mantém o protocolo 7. O instalador preserva os dados e a identidade. A instalação encerra o aplicativo e qualquer host executado por ele.
+
 # Lanvox 0.3.1
 
 ## Inicialização e conexão

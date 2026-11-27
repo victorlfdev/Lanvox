@@ -199,8 +199,13 @@ pub(super) fn share_picker(app: &mut LanvoxApp, ctx: &egui::Context) {
                 let text = !app.settings.stream.motion_video;
                 if ui.selectable_label(!text, "Vídeo e jogos").clicked() {
                     app.settings.stream.resolution = Resolution::P720;
-                    app.settings.stream.fps = 30;
+                    app.settings.stream.fps = 60;
                     app.settings.stream.motion_video = true;
+                    // Games are better captured through their own window: this
+                    // keeps desktop changes out of the stream and selects the
+                    // Windows Graphics Capture path when it is available.
+                    app.picker.windows_tab = true;
+                    app.picker.selected = None;
                 }
                 if ui.selectable_label(text, "Texto nítido").clicked() {
                     app.settings.stream.resolution = TEXT_PRESET.0;

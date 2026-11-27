@@ -6,7 +6,9 @@
 //! compositor's own copy of a window or a screen, survives mode switches and is
 //! what other streaming apps use for games.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windows::core::{factory, Interface};
@@ -53,6 +55,7 @@ pub struct WgcCapture {
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     arrived: Receiver<()>,
+    frame_events: Arc<AtomicU32>,
     size: SizeInt32,
     /// Two staging textures: the copy of the new frame is queued into one while the
     /// previous frame is read from the other. Nonblocking Map skips a copy still
@@ -63,6 +66,7 @@ pub struct WgcCapture {
     pending: Option<(usize, u32, u32)>,
     next_staging: usize,
     window: Option<HWND>,
+    map_busy: u32,
 }
 
 impl WgcCapture {
@@ -131,7 +135,10 @@ impl WgcCapture {
             Direct3D11CaptureFramePool::CreateFreeThreaded(&winrt_device, FORMAT, BUFFERS, size)
                 .map_err(|e| err("frame pool", e))?;
         let (tx, arrived) = sync_channel(1);
+        let frame_events = Arc::new(AtomicU32::new(0));
+        let event_counter = frame_events.clone();
         pool.FrameArrived(&TypedEventHandler::new(move |_, _| {
+            event_counter.fetch_add(1, Ordering::Relaxed);
             let _ = tx.try_send(());
             Ok(())
         }))
@@ -154,13 +161,25 @@ impl WgcCapture {
             pool,
             session,
             arrived,
+            frame_events,
             size,
             staging: [None, None],
             staging_size: (0, 0),
             pending: None,
             next_staging: 0,
             window,
+            map_busy: 0,
         })
+    }
+
+    /// Number of staging maps that were not ready since the previous read.
+    pub fn take_map_busy(&mut self) -> u32 {
+        std::mem::take(&mut self.map_busy)
+    }
+
+    /// Number of frames that reached the capture pool since the previous read.
+    pub fn take_frame_events(&self) -> u32 {
+        self.frame_events.swap(0, Ordering::Relaxed)
     }
 
     /// The newest picture, waiting up to `wait` for one. `Ok(None)` means nothing
@@ -196,7 +215,7 @@ impl WgcCapture {
         }
     }
 
-    /// Maps one staging texture and converts it to RGBA.
+    /// Maps one staging texture and copies tightly packed BGRA rows.
     fn read_staging(
         &mut self,
         index: usize,
@@ -215,30 +234,21 @@ impl WgcCapture {
                 Some(&mut mapped),
             ) {
                 Ok(()) => {}
-                Err(e) if e.code() == DXGI_ERROR_WAS_STILL_DRAWING => return Ok(None),
+                Err(e) if e.code() == DXGI_ERROR_WAS_STILL_DRAWING => {
+                    self.map_busy = self.map_busy.saturating_add(1);
+                    return Ok(None);
+                }
                 Err(e) => return Err(err("map frame", e)),
             }
             let pitch = mapped.RowPitch as usize;
             let src = std::slice::from_raw_parts(mapped.pData as *const u8, pitch * ph as usize);
             let row = pw as usize * 4;
-            let mut rgba = vec![0u8; row * ph as usize];
-            // BGRA -> RGBA, rows spread over the rayon pool.
-            use rayon::prelude::*;
-            rgba.par_chunks_exact_mut(row)
-                .enumerate()
-                .for_each(|(y, out)| {
-                    let line = &src[y * pitch..y * pitch + row];
-                    for (o, i) in out
-                        .as_chunks_mut::<4>()
-                        .0
-                        .iter_mut()
-                        .zip(line.as_chunks::<4>().0)
-                    {
-                        *o = [i[2], i[1], i[0], 255];
-                    }
-                });
+            let mut bgra = vec![0u8; row * ph as usize];
+            for y in 0..ph as usize {
+                bgra[y * row..(y + 1) * row].copy_from_slice(&src[y * pitch..y * pitch + row]);
+            }
             self.context.Unmap(&staging, 0);
-            Ok(Some((pw, ph, rgba)))
+            Ok(Some((pw, ph, bgra)))
         }
     }
 

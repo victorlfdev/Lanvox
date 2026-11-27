@@ -7,13 +7,14 @@
 //! OpenH264 is Cisco's own binary (see `openh264_runtime`); without it both
 //! encoder and decoder refuse to start and video uses JPEG instead.
 
+use super::codec::PixelFormat;
 use crate::protocol::{picture_bytes, EncodedVideoFrame, MAX_VIDEO_PIXELS, MAX_VIDEO_SIDE};
 use openh264::decoder::{Decoder, DecoderConfig};
 use openh264::encoder::{
     BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, Profile,
     RateControlMode, UsageType,
 };
-use openh264::formats::{RgbaSliceU8, YUVBuffer, YUVSource};
+use openh264::formats::{BgraSliceU8, RgbaSliceU8, YUVBuffer, YUVSource};
 
 enum HwState {
     Untried,
@@ -52,9 +53,10 @@ impl TemporalEncoder {
 
     fn encode_hardware(
         &mut self,
-        rgba: &[u8],
+        pixels: &[u8],
         width: u32,
         height: u32,
+        format: PixelFormat,
         force: bool,
     ) -> Option<Result<Option<EncodedVideoFrame>, String>> {
         if crate::branding::env_flag("LANVOX_H264_SOFTWARE") {
@@ -77,7 +79,7 @@ impl TemporalEncoder {
         };
         let outcome = match hw
             .set_bitrate(self.bitrate)
-            .and_then(|()| hw.encode(rgba, force))
+            .and_then(|()| hw.encode(pixels, format, force))
         {
             Ok(Some((data, keyframe))) => {
                 if data.len() > 2 * 1024 * 1024 {
@@ -168,14 +170,35 @@ impl TemporalEncoder {
         height: u32,
         force: bool,
     ) -> Result<Option<EncodedVideoFrame>, String> {
+        self.encode_format(rgba, width, height, PixelFormat::Rgba, force)
+    }
+
+    pub fn encode_bgra(
+        &mut self,
+        bgra: &[u8],
+        width: u32,
+        height: u32,
+        force: bool,
+    ) -> Result<Option<EncodedVideoFrame>, String> {
+        self.encode_format(bgra, width, height, PixelFormat::Bgra, force)
+    }
+
+    fn encode_format(
+        &mut self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        force: bool,
+    ) -> Result<Option<EncodedVideoFrame>, String> {
         if !width.is_multiple_of(2)
             || !height.is_multiple_of(2)
-            || picture_bytes(width, height) != Some(rgba.len())
+            || picture_bytes(width, height) != Some(pixels.len())
         {
             return Err("Dimensões inválidas para vídeo H.264".into());
         }
         let was_hardware = matches!(self.hw, HwState::Active(..));
-        if let Some(result) = self.encode_hardware(rgba, width, height, force) {
+        if let Some(result) = self.encode_hardware(pixels, width, height, format, force) {
             return result;
         }
         // A switch from GPU to CPU mid-stream must start with a fresh IDR.
@@ -226,8 +249,11 @@ impl TemporalEncoder {
         if force {
             self.encoder.force_intra_frame();
         }
-        let input = RgbaSliceU8::new(rgba, (width as usize, height as usize));
-        let yuv = YUVBuffer::from_rgba8_source(input);
+        let dimensions = (width as usize, height as usize);
+        let yuv = match format {
+            PixelFormat::Rgba => YUVBuffer::from_rgba8_source(RgbaSliceU8::new(pixels, dimensions)),
+            PixelFormat::Bgra => YUVBuffer::from_bgra8_source(BgraSliceU8::new(pixels, dimensions)),
+        };
         let encoded = self
             .encoder
             .encode(&yuv)

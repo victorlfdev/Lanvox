@@ -5,6 +5,25 @@ use rayon::prelude::*;
 
 use crate::protocol::{Tile, VideoFrame};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PixelFormat {
+    #[default]
+    Rgba,
+    Bgra,
+}
+
+/// Produces the RGBA layout expected by egui's image upload path.
+pub fn into_rgba(pixels: &[u8], format: PixelFormat) -> Vec<u8> {
+    if format == PixelFormat::Rgba {
+        return pixels.to_vec();
+    }
+    let mut rgba = vec![0; pixels.len()];
+    rgba.par_chunks_exact_mut(4)
+        .zip(pixels.par_chunks_exact(4))
+        .for_each(|(out, input)| out.copy_from_slice(&[input[2], input[1], input[0], 255]));
+    rgba
+}
+
 /// Side of one square tile in pixels.
 pub const TILE: u32 = 64;
 /// Lowest tile quality the bitrate control goes down to (estimated).

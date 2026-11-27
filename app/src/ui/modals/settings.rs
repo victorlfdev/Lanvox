@@ -649,8 +649,13 @@ pub(super) fn streaming_tab(app: &mut LanvoxApp, ui: &mut egui::Ui) {
             );
         }
         ui.label(format!(
-            "Captura {:.1}fps · codificado {:.1}fps · enviado {:.1}fps · descartados {}",
-            stats.capture_fps, stats.encoded_fps, stats.fps, stats.dropped_frames
+            "Eventos WGC {}/s · captura {:.1}fps · map ocupado {}/s · codificado {:.1}fps · aceitos na fila {:.1}fps · descartados {}",
+            stats.capture_events,
+            stats.capture_fps,
+            stats.capture_busy,
+            stats.encoded_fps,
+            stats.fps,
+            stats.dropped_frames
         ));
         ui.label(if stats.audio_active {
             "Áudio compartilhado ativo"

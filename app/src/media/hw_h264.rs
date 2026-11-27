@@ -6,11 +6,15 @@
 //! OpenH264 software encoder, so a machine without a usable GPU encoder keeps
 //! working exactly as before.
 
-/// Converts tightly packed RGBA to NV12 (BT.601, limited range - the same
-/// matrix the OpenH264 path and the receiving decoder use).
-#[cfg_attr(not(windows), allow(dead_code))]
-pub fn rgba_to_nv12(rgba: &[u8], w: usize, h: usize, out: &mut Vec<u8>) {
+use super::codec::PixelFormat;
+
+/// Converts tightly packed RGB channel layouts to NV12 (BT.601 limited range).
+fn pixels_to_nv12(pixels: &[u8], w: usize, h: usize, out: &mut Vec<u8>, format: PixelFormat) {
     use rayon::prelude::*;
+    let (red, green, blue) = match format {
+        PixelFormat::Rgba => (0, 1, 2),
+        PixelFormat::Bgra => (2, 1, 0),
+    };
     out.resize(w * h * 3 / 2, 0);
     let (y_plane, uv_plane) = out.split_at_mut(w * h);
     y_plane
@@ -19,14 +23,18 @@ pub fn rgba_to_nv12(rgba: &[u8], w: usize, h: usize, out: &mut Vec<u8>) {
         .enumerate()
         .for_each(|(row, (y_rows, uv_row))| {
             let (y0, y1) = y_rows.split_at_mut(w);
-            let src0 = &rgba[2 * row * w * 4..(2 * row + 1) * w * 4];
-            let src1 = &rgba[(2 * row + 1) * w * 4..(2 * row + 2) * w * 4];
+            let src0 = &pixels[2 * row * w * 4..(2 * row + 1) * w * 4];
+            let src1 = &pixels[(2 * row + 1) * w * 4..(2 * row + 2) * w * 4];
             for x in (0..w).step_by(2) {
                 let (mut r_sum, mut g_sum, mut b_sum) = (0i32, 0i32, 0i32);
                 for (src, y_row) in [(src0, &mut *y0), (src1, &mut *y1)] {
                     for dx in 0..2 {
                         let p = (x + dx) * 4;
-                        let (r, g, b) = (src[p] as i32, src[p + 1] as i32, src[p + 2] as i32);
+                        let (r, g, b) = (
+                            src[p + red] as i32,
+                            src[p + green] as i32,
+                            src[p + blue] as i32,
+                        );
                         y_row[x + dx] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
                         r_sum += r;
                         g_sum += g;
@@ -68,14 +76,19 @@ impl HwEncoder {
     pub fn set_bitrate(&mut self, _: u32) -> Result<(), String> {
         Err("indisponível".into())
     }
-    pub fn encode(&mut self, _: &[u8], _: bool) -> Result<Option<(Vec<u8>, bool)>, String> {
+    pub fn encode(
+        &mut self,
+        _: &[u8],
+        _: PixelFormat,
+        _: bool,
+    ) -> Result<Option<(Vec<u8>, bool)>, String> {
         Err("indisponível".into())
     }
 }
 
 #[cfg(windows)]
 mod imp {
-    use super::{has_nal, rgba_to_nv12};
+    use super::{has_nal, pixels_to_nv12, PixelFormat};
     use std::collections::VecDeque;
     use std::mem::ManuallyDrop;
     use std::time::{Duration, Instant};
@@ -389,14 +402,15 @@ mod imp {
         /// did not produce one yet. The bool is true for IDR frames.
         pub fn encode(
             &mut self,
-            rgba: &[u8],
+            pixels: &[u8],
+            format: PixelFormat,
             force: bool,
         ) -> Result<Option<(Vec<u8>, bool)>, String> {
             let (w, h) = (self.width as usize, self.height as usize);
-            if rgba.len() != w * h * 4 {
+            if pixels.len() != w * h * 4 {
                 return Err("Tamanho de quadro inesperado para o encoder de GPU".into());
             }
-            rgba_to_nv12(rgba, w, h, &mut self.nv12);
+            pixels_to_nv12(pixels, w, h, &mut self.nv12, format);
             unsafe {
                 if force && self.frame_index > 0 {
                     set_codec(
@@ -585,7 +599,7 @@ mod imp {
         fn nv12_gray_is_neutral_chroma() {
             let rgba = vec![128u8; 8 * 4 * 4];
             let mut out = Vec::new();
-            rgba_to_nv12(&rgba, 8, 4, &mut out);
+            pixels_to_nv12(&rgba, 8, 4, &mut out, PixelFormat::Rgba);
             assert_eq!(out.len(), 8 * 4 * 3 / 2);
             assert!(out[..32].iter().all(|v| (125..=127).contains(v)));
             assert!(out[32..].iter().all(|v| (127..=129).contains(v)));

@@ -24,6 +24,8 @@ pub struct Picture {
     pub version: u64,
     pub fps: f32,
     pub kbps: f32,
+    pub decode_ms: f32,
+    pub queue_ms: f32,
     frames: u32,
     bytes: usize,
     window: Instant,
@@ -39,6 +41,8 @@ impl Picture {
             version: 0,
             fps: 0.0,
             kbps: 0.0,
+            decode_ms: 0.0,
+            queue_ms: 0.0,
             frames: 0,
             bytes: 0,
             window: Instant::now(),
@@ -120,6 +124,14 @@ impl PictureStore {
             self.cursors.lock().remove(&key.0);
         }
     }
+
+    fn record_decode_timing(&self, key: StreamKey, queue_ms: f32, decode_ms: f32) {
+        if let Some(picture) = self.inner.lock().get_mut(&key) {
+            picture.queue_ms = queue_ms;
+            picture.decode_ms = decode_ms;
+        }
+    }
+
     pub fn clear(&self) {
         self.inner.lock().clear();
         self.cursors.lock().clear();
@@ -317,6 +329,8 @@ impl Decoder {
                         request_recovery(&requests, job.key, &job.sender);
                         continue;
                     }
+                    let queue_ms = job.queued.elapsed().as_secs_f32() * 1000.0;
+                    let decode_started = Instant::now();
                     let mut decoded = false;
                     match job.frame {
                         DecodeFrame::Tiles(frame) => {
@@ -388,6 +402,13 @@ impl Decoder {
                             }
                         }
                         DecodeFrame::Forget => {}
+                    }
+                    if decoded {
+                        store.record_decode_timing(
+                            job.key,
+                            queue_ms,
+                            decode_started.elapsed().as_secs_f32() * 1000.0,
+                        );
                     }
                     if decoded
                         && feedback_sent
