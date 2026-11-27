@@ -1,3 +1,12 @@
+# Lanvox 0.3.3
+
+## Compartilhamento de tela
+
+- Adaptação automática passa a reduzir a resolução quando a captura ou a codificação ficam abaixo da taxa solicitada, preservando 60 FPS até 480p.
+- Prévia local passa de 720×405 para 1024×576 com cadência de 30 FPS, mantendo baixo o custo de escala.
+
+Esta atualização mantém o protocolo 7. O instalador preserva os dados e a identidade. A instalação encerra o aplicativo e qualquer host executado por ele.
+
 # Lanvox 0.3.2
 
 ## Compartilhamento de tela

@@ -22,7 +22,7 @@ pub const KEYFRAME_INTERVAL: Duration = Duration::from_secs(8);
 const MIN_KEYFRAME_GAP: Duration = Duration::from_millis(600);
 /// Bitrate ceiling, whatever the resolution (kbit/s).
 const MAX_KBPS_LIMIT: u32 = 40_000;
-/// Deepest adaptation step. Reduce resolution before reducing the requested FPS.
+/// Deepest adaptation step. Keep the requested FPS and lower resolution to 480p.
 const MAX_LEVEL: u32 = 4;
 /// Smallest side length the adaptation may scale down to.
 const MIN_ADAPTED_SIDE: u32 = 480;
@@ -144,11 +144,11 @@ impl StreamSettings {
     }
 }
 
-/// The local preview is refreshed at most this often.
-const PREVIEW_GAP: Duration = Duration::from_micros(16_667);
-/// Pixel budget for the local preview. The transmitted frame keeps its requested
-/// resolution; this only avoids converting full 1080p frames for a smaller UI tile.
-const PREVIEW_PIXEL_BUDGET: u64 = 720 * 405;
+/// The local preview is refreshed at most 30 times per second.
+const PREVIEW_GAP: Duration = Duration::from_micros(33_333);
+/// Pixel budget matches the local tile at common window sizes. The 30 Hz cadence
+/// keeps its CPU scaling cost near the old 720x405-at-60-Hz preview.
+const PREVIEW_PIXEL_BUDGET: u64 = 1024 * 576;
 
 /// A short final spin avoids oversleeping a 60 Hz capture deadline on Windows.
 /// The capture worker sleeps for most of the interval, then waits against the
@@ -202,19 +202,16 @@ impl LatestFrame {
     }
 }
 
-/// Frame rate at an adaptation level. Keep the requested rate while resolution
-/// adapts; halve it only after the lowest resolution step still cannot keep up.
-fn level_fps(fps: u32, level: u32) -> u32 {
-    let factor = [1.0, 1.0, 1.0, 1.0, 0.5][level.min(MAX_LEVEL) as usize];
-    let floor = 15.min(fps);
-    ((fps as f64 * factor) as u32).clamp(floor.max(1), 60)
+/// Preserve the requested frame rate at every resolution adaptation level.
+fn level_fps(fps: u32, _level: u32) -> u32 {
+    fps.clamp(1, 60)
 }
 
-/// Picture size for a source size at an adaptation level. Levels 1–3 reduce
-/// resolution progressively, never below MIN_ADAPTED_SIDE on the short side.
+/// Picture size for a source size at an adaptation level. Reduce resolution
+/// progressively, never below MIN_ADAPTED_SIDE on the short side.
 fn target_dimensions(settings: &StreamSettings, sw: u32, sh: u32, level: u32) -> (u32, u32) {
     let (requested_w, requested_h) = settings.dimensions(sw, sh);
-    let reduction = [1.0, 0.85, 0.70, 0.55, 0.55][level.min(MAX_LEVEL) as usize];
+    let reduction = [1.0, 0.85, 0.70, 0.55, 0.40][level.min(MAX_LEVEL) as usize];
     let short = requested_w.min(requested_h);
     let floor_side = MIN_ADAPTED_SIDE.min(short);
     let reduction = if f64::from(short) * reduction < f64::from(floor_side) {
@@ -1014,14 +1011,14 @@ impl ScreenShare {
                                 (current.capture_fps, current.encoded_fps)
                             };
                             let target_fps = level_fps(settings.fps, level) as f32;
-                            // Long encoder calls can drop visible game frames even when
-                            // average work time stays below one frame period. When capture
-                            // keeps pace, actual encoded cadence is a second signal for
-                            // adaptive resolution.
-                            let encoder_underproducing = watching
-                                && motion.is_some()
-                                && capture_fps >= target_fps * 0.90
-                                && encoded_fps < target_fps * 0.95;
+                            // Drive resolution down whenever either side of the sender
+                            // misses the requested cadence. The old encoder check was
+                            // gated on capture already being near target, so a slow game
+                            // capture path could leave a 1080p encoder stuck at 5–20 FPS.
+                            let capture_underproducing =
+                                watching && capture_fps < target_fps * 0.95;
+                            let encoder_underproducing =
+                                watching && encoded_fps < target_fps * 0.95;
                             // Real congestion: the send queue overflowed, the queue is
                             // deeply backed up, or pacing swallowed most captures.
                             let slow = skipped_window > settings.fps.max(1) / 2;
@@ -1029,6 +1026,7 @@ impl ScreenShare {
                             let capture_stalled = watching && busy_maps > settings.fps.max(1) / 10;
                             let overloaded = work_ms > tick.as_secs_f64() * 1000.0 * 0.9
                                 || capture_stalled
+                                || capture_underproducing
                                 || encoder_underproducing;
                             let transport = sender.media_stats();
                             let remote = sender.video_control(StreamKind::Screen);
@@ -1136,15 +1134,19 @@ mod tests {
     }
 
     #[test]
-    fn adaptation_levels_never_drop_below_the_fps_floor() {
+    fn adaptation_preserves_fps_through_480p() {
         assert_eq!(level_fps(60, 0), 60);
         assert_eq!(level_fps(60, 3), 60);
-        assert_eq!(level_fps(60, 4), 30);
+        assert_eq!(level_fps(60, 4), 60);
         assert_eq!(level_fps(15, 4), 15);
         let settings = StreamSettings::default();
         let full = target_dimensions(&settings, 1920, 1080, 0);
         let light = target_dimensions(&settings, 1920, 1080, 2);
+        let lowest = target_dimensions(&settings, 1920, 1080, 4);
         assert_eq!(full, (1920, 1080));
+        assert_eq!(preview_dimensions(1920, 1080), (1024, 576));
+        assert!(lowest.0 >= 480 && lowest.1 >= 480);
+        assert!(lowest.1 <= 484 && lowest.0.is_multiple_of(2) && lowest.1.is_multiple_of(2));
         let first_adaptation = target_dimensions(&settings, 1920, 1080, 1);
         assert!(first_adaptation.0 < full.0 && first_adaptation.0.is_multiple_of(2));
         assert!(
