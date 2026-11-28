@@ -27,4 +27,9 @@ pub mod video;
 #[cfg(feature = "gui")]
 pub mod voice;
 #[cfg(all(feature = "gui", windows))]
+pub mod vulkan_h264;
+#[cfg(all(feature = "gui", windows))]
 pub mod wgc;
+
+#[cfg(all(test, windows))]
+mod bench;

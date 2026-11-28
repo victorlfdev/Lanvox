@@ -22,9 +22,10 @@ use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_FLAG_DO_NOT_WAIT,
-    D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_FLAG_DO_NOT_WAIT, D3D11_MAP_READ, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, DXGI_ERROR_WAS_STILL_DRAWING};
 use windows::Win32::Graphics::Gdi::HMONITOR;
@@ -48,6 +49,16 @@ fn handle(id: u32) -> *mut core::ffi::c_void {
     id as i32 as isize as *mut core::ffi::c_void
 }
 
+/// A captured frame that stays on the GPU. The encoder converts it to NV12 and
+/// feeds the hardware MFT from the same texture, so no full picture is copied
+/// through CPU memory.
+#[derive(Clone)]
+pub struct GpuFrame {
+    pub texture: ID3D11Texture2D,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub struct WgcCapture {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -67,6 +78,76 @@ pub struct WgcCapture {
     next_staging: usize,
     window: Option<HWND>,
     map_busy: u32,
+    /// Render-target textures the encoder can read without a CPU staging copy.
+    /// Three are kept so the asynchronous encoder never overwrites one it still
+    /// holds.
+    gpu_targets: [Option<ID3D11Texture2D>; 3],
+    gpu_size: (u32, u32),
+    next_gpu: usize,
+}
+
+/// A D3D11 device usable by both capture and the hardware encoder.
+pub fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
+    let mut device = None;
+    let mut context = None;
+    unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )
+        .map_err(|e| err("D3D11 device", e))?;
+    }
+    Ok((
+        device.ok_or("no D3D11 device")?,
+        context.ok_or("no D3D11 context")?,
+    ))
+}
+
+/// CPU pixels for the local preview. Called only at preview cadence, not once
+/// per streamed frame.
+pub fn read_texture(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    texture: &ID3D11Texture2D,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    unsafe { texture.GetDesc(&mut desc) };
+    let mut sd = desc;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.MiscFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+    sd.MipLevels = 1;
+    sd.ArraySize = 1;
+    let mut staging = None;
+    unsafe { device.CreateTexture2D(&sd, None, Some(&mut staging)) }
+        .map_err(|e| err("preview staging texture", e))?;
+    let staging = staging.ok_or("no preview staging texture")?;
+    let row = width as usize * 4;
+    let mut bgra = vec![0u8; row * height as usize];
+    unsafe {
+        context.CopyResource(&staging, texture);
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        context
+            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            .map_err(|e| err("preview map", e))?;
+        let pitch = mapped.RowPitch as usize;
+        let src = std::slice::from_raw_parts(mapped.pData as *const u8, pitch * height as usize);
+        for y in 0..height as usize {
+            bgra[y * row..(y + 1) * row].copy_from_slice(&src[y * pitch..y * pitch + row]);
+        }
+        context.Unmap(&staging, 0);
+    }
+    Ok(bgra)
 }
 
 impl WgcCapture {
@@ -74,7 +155,17 @@ impl WgcCapture {
         GraphicsCaptureSession::IsSupported().unwrap_or(false)
     }
 
+    #[allow(dead_code)] // convenience constructor for manual benchmarks
     pub fn new(id: SourceId) -> Result<Self, String> {
+        let (device, context) = create_device()?;
+        Self::new_with_device(id, device, context)
+    }
+
+    pub fn new_with_device(
+        id: SourceId,
+        device: ID3D11Device,
+        context: ID3D11DeviceContext,
+    ) -> Result<Self, String> {
         // WinRT needs the thread in a COM apartment; "already initialized" is fine.
         let _ = unsafe {
             windows::Win32::System::Com::CoInitializeEx(
@@ -107,24 +198,6 @@ impl WgcCapture {
             }
         };
 
-        let mut device = None;
-        let mut context = None;
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-            .map_err(|e| err("D3D11 device", e))?;
-        }
-        let device = device.ok_or("no D3D11 device")?;
-        let context = context.ok_or("no D3D11 context")?;
         let dxgi: IDXGIDevice = device.cast().map_err(|e| err("DXGI device", e))?;
         let winrt_device: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
             .and_then(|i| i.cast())
@@ -169,6 +242,9 @@ impl WgcCapture {
             next_staging: 0,
             window,
             map_busy: 0,
+            gpu_targets: [None, None, None],
+            gpu_size: (0, 0),
+            next_gpu: 0,
         })
     }
 
@@ -213,6 +289,92 @@ impl WgcCapture {
                 Err(RecvTimeoutError::Disconnected) => return Err("capture stopped".into()),
             }
         }
+    }
+
+    /// The newest frame as a GPU texture, with no CPU readback.
+    pub fn grab_gpu(&mut self, wait: Duration) -> Result<Option<GpuFrame>, String> {
+        if let Some(hwnd) = self.window {
+            if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+                return Err("window was closed".into());
+            }
+        }
+        let deadline = Instant::now() + wait;
+        loop {
+            let mut newest: Option<Direct3D11CaptureFrame> = None;
+            while let Ok(frame) = self.pool.TryGetNextFrame() {
+                if let Some(old) = newest.replace(frame) {
+                    let _ = old.Close();
+                }
+            }
+            if let Some(frame) = newest {
+                let result = self.read_gpu(&frame);
+                let _ = frame.Close();
+                return result;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            match self.arrived.recv_timeout(left) {
+                Ok(()) => {}
+                Err(RecvTimeoutError::Timeout) => return Ok(None),
+                Err(RecvTimeoutError::Disconnected) => return Err("capture stopped".into()),
+            }
+        }
+    }
+
+    fn read_gpu(&mut self, frame: &Direct3D11CaptureFrame) -> Result<Option<GpuFrame>, String> {
+        let content = frame.ContentSize().map_err(|e| err("frame size", e))?;
+        if content.Width <= 0 || content.Height <= 0 {
+            return Ok(None);
+        }
+        if content.Width != self.size.Width || content.Height != self.size.Height {
+            self.size = content;
+            self.pool
+                .Recreate(&self.winrt_device, FORMAT, BUFFERS, content)
+                .map_err(|e| err("resize frame pool", e))?;
+            return Ok(None);
+        }
+        let surface = frame.Surface().map_err(|e| err("frame surface", e))?;
+        let access: IDirect3DDxgiInterfaceAccess =
+            surface.cast().map_err(|e| err("surface access", e))?;
+        let texture: ID3D11Texture2D =
+            unsafe { access.GetInterface() }.map_err(|e| err("frame texture", e))?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut desc) };
+        let w = (content.Width as u32).min(desc.Width);
+        let h = (content.Height as u32).min(desc.Height);
+        if self.gpu_size != (desc.Width, desc.Height) || self.gpu_targets[0].is_none() {
+            let mut sd = desc;
+            sd.Usage = D3D11_USAGE_DEFAULT;
+            sd.BindFlags = D3D11_BIND_RENDER_TARGET.0 as u32;
+            sd.CPUAccessFlags = 0;
+            sd.MiscFlags = 0;
+            sd.MipLevels = 1;
+            sd.ArraySize = 1;
+            for slot in &mut self.gpu_targets {
+                let mut target = None;
+                unsafe { self.device.CreateTexture2D(&sd, None, Some(&mut target)) }
+                    .map_err(|e| err("GPU target texture", e))?;
+                *slot = Some(target.ok_or("no GPU target texture")?);
+            }
+            self.gpu_size = (desc.Width, desc.Height);
+            self.next_gpu = 0;
+        }
+        let index = self.next_gpu;
+        self.next_gpu = (self.next_gpu + 1) % self.gpu_targets.len();
+        let target = self.gpu_targets[index]
+            .clone()
+            .ok_or("no GPU target texture")?;
+        unsafe {
+            self.context.CopyResource(&target, &texture);
+            self.context.Flush();
+        }
+        Ok(Some(GpuFrame {
+            texture: target,
+            width: w,
+            height: h,
+        }))
     }
 
     /// Maps one staging texture and copies tightly packed BGRA rows.

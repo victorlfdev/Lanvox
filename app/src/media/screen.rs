@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use super::codec::{fit_resolution, into_rgba, scale_rgba, PixelFormat, RateControl, TileEncoder};
+use super::codec::{
+    fit_resolution, into_rgba, scale_rgba, scale_to_rgba, PixelFormat, RateControl, TileEncoder,
+};
 use super::cursor::{self, Rect};
 use super::video::PictureStore;
 use crate::model::{StreamKind, UserId};
@@ -21,7 +23,7 @@ pub const KEYFRAME_INTERVAL: Duration = Duration::from_secs(8);
 /// IDR already in flight must not trigger another huge burst.
 const MIN_KEYFRAME_GAP: Duration = Duration::from_millis(600);
 /// Bitrate ceiling, whatever the resolution (kbit/s).
-const MAX_KBPS_LIMIT: u32 = 40_000;
+const MAX_KBPS_LIMIT: u32 = 80_000;
 /// Deepest adaptation step. Keep the requested FPS and lower resolution to 480p.
 const MAX_LEVEL: u32 = 4;
 /// Smallest side length the adaptation may scale down to.
@@ -169,7 +171,23 @@ fn preview_dimensions(width: u32, height: u32) -> (u32, u32) {
     fit_resolution(width, height, PREVIEW_PIXEL_BUDGET)
 }
 
-type Capture = (u32, u32, Vec<u8>, PixelFormat);
+/// A hand-over picture. GPU frames stay in VRAM until the hardware encoder
+/// consumes them; CPU frames come from the GDI/desktop-duplication paths.
+enum Capture {
+    Cpu(u32, u32, Vec<u8>, PixelFormat),
+    #[cfg(windows)]
+    Gpu(super::wgc::GpuFrame),
+}
+
+impl Capture {
+    fn dimensions(&self) -> (u32, u32) {
+        match self {
+            Self::Cpu(w, h, _, _) => (*w, *h),
+            #[cfg(windows)]
+            Self::Gpu(frame) => (frame.width, frame.height),
+        }
+    }
+}
 
 /// Hand-over between the capture and the encode thread: only the newest picture
 /// is kept, so a slow encoder drops old pictures instead of building latency.
@@ -205,6 +223,22 @@ impl LatestFrame {
 /// Preserve the requested frame rate at every resolution adaptation level.
 fn level_fps(fps: u32, _level: u32) -> u32 {
     fps.clamp(1, 60)
+}
+
+/// A still screen produces no pictures: Graphics Capture and desktop duplication
+/// only fire when pixels change. A slow capture is a different case — the source
+/// delivered frames but the reader could not keep up. Do not lower the resolution
+/// when there was never enough new content to fill the requested cadence.
+fn capture_is_lagging(capture_fps: f32, capture_events: u32, target_fps: f32) -> bool {
+    let available = capture_fps.max(capture_events as f32);
+    available >= target_fps * 0.5 && capture_fps < target_fps * 0.95
+}
+
+/// H.264 emits nothing for an unchanged picture, and the sender skips those
+/// pictures on purpose. Only a picture that was offered but not handled means
+/// the encoder itself cannot keep up.
+fn encoder_is_lagging(offered_fps: f32, handled_fps: f32, target_fps: f32) -> bool {
+    offered_fps > 0.0 && handled_fps < offered_fps.min(target_fps) * 0.95
 }
 
 /// Picture size for a source size at an adaptation level. Reduce resolution
@@ -483,9 +517,18 @@ pub struct ShareStats {
     pub capture_events: u32,
     pub capture_busy: u32,
     pub encoded_fps: f32,
+    /// Pictures handed to the encoder while a viewer was connected, per second.
+    pub offered_fps: f32,
+    /// Pictures the encoder handled (including deliberate skips), per second.
+    pub handled_fps: f32,
     pub dropped_frames: u64,
     pub codec: String,
     pub encode_ms: f32,
+    /// Smoothed whole-picture cost (scale + encode + preview + send). The
+    /// adaptation uses this to decide the machine cannot sustain the cadence.
+    pub work_ms: f32,
+    /// Mean encode cost over the last measurement window.
+    pub encode_avg_ms: f32,
 }
 
 pub struct ScreenShare {
@@ -569,6 +612,12 @@ impl ScreenShare {
         let tick_us = Arc::new(AtomicU64::new(
             (1_000_000.0 / f64::from(settings.fps.clamp(1, 60))) as u64,
         ));
+        #[cfg(windows)]
+        let gpu_device = super::wgc::create_device().ok();
+        #[cfg(windows)]
+        let gpu_path = Arc::new(AtomicBool::new(
+            gpu_device.is_some() && !crate::branding::env_flag("LANVOX_CPU_CAPTURE"),
+        ));
         let latest = Arc::new(LatestFrame::default());
         let captured = Arc::new(AtomicU32::new(0));
         let capture_events = Arc::new(AtomicU32::new(0));
@@ -584,10 +633,19 @@ impl ScreenShare {
             let capture_events = capture_events.clone();
             let capture_busy = capture_busy.clone();
             let sender = sender.clone();
+            #[cfg(windows)]
+            let gpu_path = gpu_path.clone();
+            #[cfg(windows)]
+            let gpu_device = gpu_device.clone();
             std::thread::Builder::new()
                 .name("screen-capture".into())
                 .spawn(move || {
                     // Graphics Capture first: it is the only path that sees games.
+                    #[cfg(windows)]
+                    let mut wgc = gpu_device.as_ref().and_then(|(device, context)| {
+                        GameCapture::new_with_device(id, device.clone(), context.clone()).ok()
+                    });
+                    #[cfg(not(windows))]
                     let mut wgc = GameCapture::new(id).ok();
                     let mut recorder = if wgc.is_some() {
                         None
@@ -611,19 +669,32 @@ impl ScreenShare {
                             wait_until_capture_deadline(next_wgc_sample);
                         }
                         let started = Instant::now();
-                        let grabbed: Result<Option<Capture>, String> = match wgc
-                            .as_mut()
-                            .map(|c| c.grab(tick))
-                        {
-                            Some(Err(e)) if e != "window was closed" => {
-                                // Graphics Capture broke: fall back to the older paths.
-                                wgc = None;
-                                recorder = start_recorder(id);
-                                continue;
+                        let grabbed: Result<Option<Capture>, String> = match wgc.as_mut() {
+                            #[cfg(windows)]
+                            Some(c) if gpu_path.load(Ordering::Relaxed) => {
+                                match c.grab_gpu(tick) {
+                                    Err(e) if e != "window was closed" => {
+                                        // Graphics Capture broke: fall back to older paths.
+                                        gpu_path.store(false, Ordering::Relaxed);
+                                        wgc = None;
+                                        recorder = start_recorder(id);
+                                        continue;
+                                    }
+                                    other => other.map(|frame| frame.map(Capture::Gpu)),
+                                }
                             }
-                            Some(result) => result.map(|picture| {
-                                picture.map(|(w, h, pixels)| (w, h, pixels, PixelFormat::Bgra))
-                            }),
+                            Some(c) => match c.grab(tick) {
+                                Err(e) if e != "window was closed" => {
+                                    wgc = None;
+                                    recorder = start_recorder(id);
+                                    continue;
+                                }
+                                other => other.map(|picture| {
+                                    picture.map(|(w, h, pixels)| {
+                                        Capture::Cpu(w, h, pixels, PixelFormat::Bgra)
+                                    })
+                                }),
+                            },
                             None => match &recorder {
                                 Some((_, rx)) => {
                                     // Desktop duplication: wait up to one tick for a change, keep the newest.
@@ -633,7 +704,7 @@ impl ScreenShare {
                                             while let Ok(f) = rx.try_recv() {
                                                 newest = f;
                                             }
-                                            Ok(Some((
+                                            Ok(Some(Capture::Cpu(
                                                 newest.width,
                                                 newest.height,
                                                 newest.raw,
@@ -644,9 +715,9 @@ impl ScreenShare {
                                         Err(_) => Err("recorder stopped".to_string()),
                                     }
                                 }
-                                None => capture(id)
-                                    .map(|(w, h, pixels)| (w, h, pixels, PixelFormat::Rgba))
-                                    .map(Some),
+                                None => capture(id).map(|(w, h, pixels)| {
+                                    Some(Capture::Cpu(w, h, pixels, PixelFormat::Rgba))
+                                }),
                             },
                         };
                         if let Some(capture) = wgc.as_mut() {
@@ -660,10 +731,10 @@ impl ScreenShare {
                             }
                         }
                         match grabbed {
-                            Ok(Some((w, h, pixels, format))) => {
+                            Ok(Some(picture)) => {
                                 failures = 0;
                                 captured.fetch_add(1, Ordering::Relaxed);
-                                latest.put((w, h, pixels, format));
+                                latest.put(picture);
                             }
                             Ok(None) => {}
                             Err(e) => {
@@ -699,6 +770,10 @@ impl ScreenShare {
             let stop = stop.clone();
             let stats = stats.clone();
             let capture_busy = capture_busy.clone();
+            #[cfg(windows)]
+            let gpu_path = gpu_path.clone();
+            #[cfg(windows)]
+            let gpu_device = gpu_device.clone();
             std::thread::Builder::new()
                 .name("screen-share".into())
                 .spawn(move || {
@@ -706,7 +781,38 @@ impl ScreenShare {
                     let mut encoder = TileEncoder::new();
                     let mut bitrate = super::bitrate::Controller::new(StreamKind::Screen,
                         initial_max_bps, Instant::now());
-                    let mut motion = if settings.motion_video {
+                    #[cfg(windows)]
+                    let motion = if settings.motion_video {
+                        match &gpu_device {
+                            Some((device, context))
+                                if !crate::branding::env_flag("LANVOX_H264_SOFTWARE") =>
+                            {
+                                match super::temporal::TemporalEncoder::new_with_device(
+                                    bitrate.target(),
+                                    settings.fps,
+                                    true,
+                                    device,
+                                    context,
+                                ) {
+                                    Ok(encoder) => Some(encoder),
+                                    Err(error) => {
+                                        eprintln!("GPU texture path unavailable, using staging: {error}");
+                                        None
+                                    }
+                                }
+                            }
+                            _ => super::temporal::TemporalEncoder::new(
+                                bitrate.target(),
+                                settings.fps,
+                                true,
+                            )
+                            .ok(),
+                        }
+                    } else {
+                        None
+                    };
+                    #[cfg(not(windows))]
+                    let motion = if settings.motion_video {
                         super::temporal::TemporalEncoder::new(
                             bitrate.target(),
                             settings.fps,
@@ -716,6 +822,14 @@ impl ScreenShare {
                     } else {
                         None
                     };
+                    let mut motion = motion;
+                    #[cfg(windows)]
+                    if !motion
+                        .as_ref()
+                        .is_some_and(super::temporal::TemporalEncoder::has_gpu_texture)
+                    {
+                        gpu_path.store(false, Ordering::Relaxed);
+                    }
                     stats.lock().codec = if motion.is_some() {
                         "H.264 (iniciando)"
                     } else {
@@ -730,6 +844,12 @@ impl ScreenShare {
                     let mut queued_frames = 0u32;
                     let mut window = Instant::now();
                     let mut last: Option<Capture> = None;
+                    // Dimensions of the picture the receiver last saw. A change
+                    // needs an IDR even if the pixels themselves did not move.
+                    let mut last_coded: Option<(u32, u32)> = None;
+                    let mut offered_frames = 0u32;
+                    let mut handled_frames = 0u32;
+                    let mut encode_total_ms = 0.0f64;
                     let mut level = 0u32;
                     // Lowest level the adaptation may recover to (a weak PC stays light).
                     let mut floor_level = 0u32;
@@ -794,20 +914,67 @@ impl ScreenShare {
                             None if force => last.take(),
                             None => None,
                         };
-                        if let Some((sw, sh, pixels, format)) = picture {
+                        if let Some(capture) = picture {
+                            let (sw, sh) = capture.dimensions();
+                            #[cfg(windows)]
+                            let (cpu_picture, gpu_frame) = match capture {
+                                Capture::Cpu(w, h, p, f) => (Some((w, h, p, f)), None),
+                                Capture::Gpu(frame) => (None, Some(frame)),
+                            };
+                            #[cfg(not(windows))]
+                            let (cpu_picture, gpu_frame): (
+                                Option<(u32, u32, Vec<u8>, PixelFormat)>,
+                                Option<()>,
+                            ) = match capture {
+                                Capture::Cpu(w, h, p, f) => (Some((w, h, p, f)), None),
+                            };
+                            let empty_pixels = Vec::new();
+                            let pixels: &Vec<u8> = cpu_picture
+                                .as_ref()
+                                .map(|(_, _, p, _)| p)
+                                .unwrap_or(&empty_pixels);
+                            let format = cpu_picture
+                                .as_ref()
+                                .map(|(_, _, _, f)| *f)
+                                .unwrap_or(PixelFormat::Bgra);
                             let (w, h) = target_dimensions(&settings, sw, sh, level);
+                            // A size change starts a new coded stream: a delta at the new
+                            // dimensions cannot be decoded, even inside the keyframe guard.
+                            let force = force || last_coded != Some((w, h));
+                            // Nothing moved, so there is nothing new to code. Without this
+                            // the GPU encoder converts a full NV12 picture and runs the MFT
+                            // for every unchanged refresh, which is the dominant CPU cost
+                            // of sharing a still screen at 60 FPS. The periodic IDR and
+                            // viewer recovery still re-send the held picture.
+                            let unchanged = !force
+                                && watching
+                                && last_coded == Some((w, h))
+                                && match (&last, &cpu_picture) {
+                                    (
+                                        Some(Capture::Cpu(lsw, lsh, prev, lf)),
+                                        Some((psw, psh, current, pf)),
+                                    ) => {
+                                        *lsw == *psw && *lsh == *psh && *lf == *pf
+                                            && prev == current
+                                    }
+                                    _ => false,
+                                };
+                            if watching {
+                                offered_frames += 1;
+                            }
                             // H.264 paths accept both channel orders. Convert BGRA only when
                             // a watched tile/JPEG fallback needs RGBA; the game capture path
                             // stays in its native format through encoding and preview scaling.
-                            let fallback_rgba = if watching
+                            let fallback_rgba = if cpu_picture.is_some()
+                                && watching
                                 && motion.is_none()
                                 && format == PixelFormat::Bgra
                             {
-                                Some(into_rgba(&pixels, format))
+                                Some(into_rgba(pixels, format))
                             } else {
                                 None
                             };
-                            let source_pixels = fallback_rgba.as_deref().unwrap_or(&pixels);
+                            let source_pixels = fallback_rgba.as_deref().unwrap_or(pixels);
                             let pixel_format = if fallback_rgba.is_some() {
                                 PixelFormat::Rgba
                             } else {
@@ -822,7 +989,7 @@ impl ScreenShare {
                                 preview_dimensions(w, h)
                             };
                             // Scale only when dimensions change; otherwise borrow the capture.
-                            let scaled = if (pic_w, pic_h) == (sw, sh) {
+                            let scaled = if cpu_picture.is_none() || (pic_w, pic_h) == (sw, sh) {
                                 None
                             } else {
                                 Some(scale_rgba(source_pixels, sw, sh, pic_w, pic_h))
@@ -841,19 +1008,43 @@ impl ScreenShare {
                             if paced_out {
                                 skipped_window += 1;
                             }
-                            if watching && !paced_out {
+                            // Only a picture the receiver has (or will have) may become
+                            // the comparison baseline. A paced-out frame was dropped:
+                            // keeping it would skip it forever once the screen goes still.
+                            let mut handled_picture = false;
+                            if watching && !paced_out && !unchanged {
+                                handled_picture = true;
                                 let encode_started = Instant::now();
+                                last_coded = Some((w, h));
                                 if force {
                                     last_key = Instant::now();
                                     last_idr = Instant::now();
                                 }
                                 if let Some(video) = motion.as_mut() {
                                     video.set_bitrate(bitrate.target());
-                                    let result = match pixel_format {
+                                    #[cfg(windows)]
+                                    let encode_result = match gpu_frame.as_ref() {
+                                        Some(frame) => video.encode_texture(frame, force),
+                                        None => match pixel_format {
+                                            PixelFormat::Rgba => video.encode(pic, w, h, force),
+                                            PixelFormat::Bgra => {
+                                                video.encode_bgra(pic, w, h, force)
+                                            }
+                                        },
+                                    };
+                                    #[cfg(not(windows))]
+                                    let encode_result = match pixel_format {
                                         PixelFormat::Rgba => video.encode(pic, w, h, force),
                                         PixelFormat::Bgra => video.encode_bgra(pic, w, h, force),
                                     };
+                                    let result = encode_result;
                                     let backend = video.backend();
+                                    #[cfg(windows)]
+                                    if backend == "CPU" {
+                                        // The hardware path failed: the capture thread must
+                                        // go back to staging copies for the next picture.
+                                        gpu_path.store(false, Ordering::Relaxed);
+                                    }
                                     if backend != shown_backend {
                                         let weak_cpu = backend == "CPU"
                                             && cores <= 4
@@ -876,6 +1067,7 @@ impl ScreenShare {
                                     }
                                     match result {
                                         Ok(Some(frame)) => {
+                                            handled_frames += 1;
                                             let bytes = frame.data.len();
                                             rc.record(bytes);
                                             // Always sent: the bucket may go into debt, which
@@ -893,9 +1085,19 @@ impl ScreenShare {
                                             if needs_keyframe {
                                                 dropped_window += 1;
                                                 stats.lock().dropped_frames += 1;
+                                                // `push_bulk` reports a dropped older
+                                                // packet. Queue the keyframe request,
+                                                // but do not immediately re-encode the
+                                                // held picture: that would inflate the
+                                                // frame rate and waste GPU time.
+                                                keyframes.screen.store(true, Ordering::SeqCst);
+                                                needs_keyframe = false;
                                             }
                                         }
-                                        Ok(None) => {}
+                                        Ok(None) => {
+                                            // A skip frame is still a picture the encoder handled.
+                                            handled_frames += 1;
+                                        }
                                         Err(error) => {
                                             // Keep the stream usable with the bounded tile codec.
                                             stats.lock().codec = format!(
@@ -905,9 +1107,17 @@ impl ScreenShare {
                                             needs_keyframe = true;
                                         }
                                     }
+                                } else if gpu_frame.is_some() {
+                                    // H.264 is not available: this picture cannot be
+                                    // tiled from VRAM, so switch back to CPU capture.
+                                    #[cfg(windows)]
+                                    gpu_path.store(false, Ordering::Relaxed);
+                                    handled_frames += 1;
+                                    rc.record(0);
                                 } else if let Some(frame) =
                                     encoder.encode(pic, w, h, rc.quality, force)
                                 {
+                                    handled_frames += 1;
                                     rc.record(frame.byte_size());
                                     tokens -= frame.byte_size() as f64;
                                     if frame.keyframe {
@@ -921,28 +1131,81 @@ impl ScreenShare {
                                     if needs_keyframe {
                                         dropped_window += 1;
                                         stats.lock().dropped_frames += 1;
+                                        keyframes.screen.store(true, Ordering::SeqCst);
+                                        needs_keyframe = false;
                                     }
                                 } else {
+                                    // No tile changed; the picture was still examined.
+                                    handled_frames += 1;
                                     rc.record(0);
                                 }
-                                stats.lock().encode_ms =
+                                let encode_ms =
                                     encode_started.elapsed().as_secs_f32() * 1000.0;
+                                encode_total_ms += f64::from(encode_ms);
+                                stats.lock().encode_ms = encode_ms;
                             } else if !watching {
+                                // The local preview uses this picture even with no viewers.
+                                handled_picture = true;
                                 rc.record(0);
                             }
-                            if last_preview.elapsed() >= PREVIEW_GAP {
+                            // Reading a GPU frame back for the local preview is the
+                            // only CPU-side full-picture copy left. While a viewer is
+                            // watching, keep it at 10 Hz so it cannot steal the
+                            // frame budget from the 60 FPS stream.
+                            let preview_gap = if watching && gpu_frame.is_some() {
+                                Duration::from_millis(100)
+                            } else {
+                                PREVIEW_GAP
+                            };
+                            if last_preview.elapsed() >= preview_gap {
                                 let (preview_w, preview_h) = preview_dimensions(w, h);
-                                let preview_scaled = if (pic_w, pic_h) == (preview_w, preview_h) {
-                                    None
+                                // egui wants RGBA. Scale and channel-swap in one pass
+                                // instead of copying the whole preview a second time.
+                                #[cfg(windows)]
+                                let (preview_source, source_w, source_h) =
+                                    if let Some(frame) = gpu_frame.as_ref() {
+                                        // Only the local preview pays for a readback,
+                                        // and only at preview cadence.
+                                        let pixels = gpu_device.as_ref().and_then(|(d, c)| {
+                                            super::wgc::read_texture(
+                                                d,
+                                                c,
+                                                &frame.texture,
+                                                frame.width,
+                                                frame.height,
+                                            )
+                                            .ok()
+                                        });
+                                        (
+                                            pixels.unwrap_or_default(),
+                                            frame.width,
+                                            frame.height,
+                                        )
+                                    } else {
+                                        (pic.to_vec(), pic_w, pic_h)
+                                    };
+                                #[cfg(not(windows))]
+                                let (preview_source, source_w, source_h) =
+                                    (pic.to_vec(), pic_w, pic_h);
+                                let preview_rgba = if (source_w, source_h)
+                                    == (preview_w, preview_h)
+                                {
+                                    into_rgba(&preview_source, pixel_format)
                                 } else {
-                                    Some(scale_rgba(pic, pic_w, pic_h, preview_w, preview_h))
+                                    scale_to_rgba(
+                                        &preview_source,
+                                        source_w,
+                                        source_h,
+                                        preview_w,
+                                        preview_h,
+                                        pixel_format,
+                                    )
                                 };
-                                let preview_pixels = preview_scaled.as_deref().unwrap_or(pic);
                                 preview.put(
                                     (me, StreamKind::Screen),
                                     preview_w,
                                     preview_h,
-                                    into_rgba(preview_pixels, pixel_format),
+                                    preview_rgba,
                                     0,
                                 );
                                 ctx.request_repaint();
@@ -957,7 +1220,20 @@ impl ScreenShare {
                             s.quality = rc.quality;
                             s.kbps = rc.last_bps as f32 / 1000.0;
                             drop(s);
-                            last = Some((sw, sh, pixels, format));
+                            if handled_picture {
+                                #[cfg(windows)]
+                                let held = gpu_frame
+                                    .map(Capture::Gpu)
+                                    .or_else(|| {
+                                        cpu_picture.map(|(w, h, p, f)| Capture::Cpu(w, h, p, f))
+                                    })
+                                    .unwrap_or_else(|| Capture::Cpu(sw, sh, Vec::new(), format));
+                                #[cfg(not(windows))]
+                                let held = cpu_picture
+                                    .map(|(w, h, p, f)| Capture::Cpu(w, h, p, f))
+                                    .unwrap_or_else(|| Capture::Cpu(sw, sh, Vec::new(), format));
+                                last = Some(held);
+                            }
                             if watching {
                                 let ms = work_started.elapsed().as_secs_f64() * 1000.0;
                                 work_ms = if work_ms == 0.0 {
@@ -972,15 +1248,22 @@ impl ScreenShare {
                             }
                             // A preview frame skipped for pacing is shown once things go quiet.
                             if preview_stale {
-                                if let Some((sw, sh, src, format)) = &last {
+                                if let Some(Capture::Cpu(sw, sh, src, format)) = &last {
                                     let (w, h) = target_dimensions(&settings, *sw, *sh, level);
                                     let (preview_w, preview_h) = preview_dimensions(w, h);
-                                    let pic = scale_rgba(src, *sw, *sh, preview_w, preview_h);
+                                    let preview_rgba = scale_to_rgba(
+                                        src,
+                                        *sw,
+                                        *sh,
+                                        preview_w,
+                                        preview_h,
+                                        *format,
+                                    );
                                     preview.put(
                                         (me, StreamKind::Screen),
                                         preview_w,
                                         preview_h,
-                                        into_rgba(&pic, *format),
+                                        preview_rgba,
                                         0,
                                     );
                                     ctx.request_repaint();
@@ -998,33 +1281,53 @@ impl ScreenShare {
                             current.capture_fps = captured.swap(0, Ordering::Relaxed) as f32 / secs;
                             current.capture_events = capture_events.swap(0, Ordering::Relaxed);
                             current.encoded_fps = encoded_frames as f32 / secs;
+                            current.offered_fps = offered_frames as f32 / secs;
+                            current.handled_fps = handled_frames as f32 / secs;
+                            current.work_ms = work_ms as f32;
+                            current.encode_avg_ms =
+                                (encode_total_ms / f64::from(handled_frames.max(1))) as f32;
                             drop(current);
                             queued_frames = 0;
                             encoded_frames = 0;
+                            offered_frames = 0;
+                            handled_frames = 0;
+                            encode_total_ms = 0.0;
                             window = Instant::now();
                         }
                         if adaptation.elapsed() >= Duration::from_secs(1) {
                             let busy_maps = capture_busy.swap(0, Ordering::Relaxed);
                             stats.lock().capture_busy = busy_maps;
-                            let (capture_fps, encoded_fps) = {
+                            let (capture_fps, capture_events_seen, offered_fps, handled_fps) = {
                                 let current = stats.lock();
-                                (current.capture_fps, current.encoded_fps)
+                                (
+                                    current.capture_fps,
+                                    current.capture_events,
+                                    current.offered_fps,
+                                    current.handled_fps,
+                                )
                             };
                             let target_fps = level_fps(settings.fps, level) as f32;
-                            // Drive resolution down whenever either side of the sender
-                            // misses the requested cadence. The old encoder check was
-                            // gated on capture already being near target, so a slow game
-                            // capture path could leave a 1080p encoder stuck at 5–20 FPS.
-                            let capture_underproducing =
-                                watching && capture_fps < target_fps * 0.95;
+                            // Only step down when a picture the stream could have used
+                            // was actually delayed. A still screen (or a once-a-second
+                            // clock) supplies no frames; resolution cannot fix that.
+                            let capture_underproducing = capture_is_lagging(
+                                capture_fps,
+                                capture_events_seen,
+                                target_fps,
+                            );
                             let encoder_underproducing =
-                                watching && encoded_fps < target_fps * 0.95;
+                                encoder_is_lagging(offered_fps, handled_fps, target_fps);
                             // Real congestion: the send queue overflowed, the queue is
                             // deeply backed up, or pacing swallowed most captures.
                             let slow = skipped_window > settings.fps.max(1) / 2;
                             // The PC itself cannot finish a picture within a frame period.
                             let capture_stalled = watching && busy_maps > settings.fps.max(1) / 10;
-                            let overloaded = work_ms > tick.as_secs_f64() * 1000.0 * 0.9
+                            // Local preview and UI repaint are part of `work_ms`, but
+                            // they do not limit the streamed cadence. Only the time
+                            // spent coding a picture does.
+                            let encode_avg_ms = stats.lock().encode_avg_ms;
+                            let overloaded =
+                                f64::from(encode_avg_ms) > tick.as_secs_f64() * 1000.0 * 0.9
                                 || capture_stalled
                                 || capture_underproducing
                                 || encoder_underproducing;
@@ -1035,7 +1338,13 @@ impl ScreenShare {
                                 || transport.dropped > previous_transport_drops
                                 || transport.queued_bytes > (bitrate.target() as usize / 8 / 5);
                             previous_transport_drops = transport.dropped;
-                            let (w, h) = last.as_ref().map_or((1920, 1080), |(w, h, _, _)| settings.dimensions(*w, *h));
+                            let (w, h) = last
+                                .as_ref()
+                                .map(|picture| {
+                                    let (sw, sh) = picture.dimensions();
+                                    settings.dimensions(sw, sh)
+                                })
+                                .unwrap_or((1920, 1080));
                             let max = settings.target_bitrate(w, h) as u32;
                             let cap = if remote.max_bps == 0 { max } else { max.min(remote.max_bps) };
                             let before = bitrate.target();
@@ -1080,10 +1389,11 @@ impl ScreenShare {
                                     let next_tick = Duration::from_secs_f64(
                                         1.0 / f64::from(level_fps(settings.fps, next)),
                                     );
-                                    let pixels_up = last.as_ref().map_or(1.0, |(sw, sh, _, _)| {
-                                        let (w, h) = target_dimensions(&settings, *sw, *sh, level);
+                                    let pixels_up = last.as_ref().map_or(1.0, |picture| {
+                                        let (sw, sh) = picture.dimensions();
+                                        let (w, h) = target_dimensions(&settings, sw, sh, level);
                                         let (next_w, next_h) =
-                                            target_dimensions(&settings, *sw, *sh, next);
+                                            target_dimensions(&settings, sw, sh, next);
                                         (f64::from(next_w) * f64::from(next_h)
                                             / (f64::from(w) * f64::from(h)))
                                             .max(1.0)
@@ -1132,11 +1442,40 @@ mod tests {
     #[test]
     fn latest_frame_keeps_only_the_newest_picture() {
         let latest = LatestFrame::default();
-        latest.put((2, 2, vec![1; 16], PixelFormat::Rgba));
-        latest.put((2, 2, vec![2; 16], PixelFormat::Rgba));
+        latest.put(Capture::Cpu(2, 2, vec![1; 16], PixelFormat::Rgba));
+        latest.put(Capture::Cpu(2, 2, vec![2; 16], PixelFormat::Rgba));
         let got = latest.take(Duration::from_millis(5)).unwrap();
-        assert_eq!(got.2[0], 2);
+        assert!(matches!(&got, Capture::Cpu(2, 2, pixels, PixelFormat::Rgba) if pixels[0] == 2));
         assert!(latest.take(Duration::from_millis(5)).is_none());
+    }
+
+    #[test]
+    fn default_share_preset_is_1080p60_with_motion_video() {
+        let settings = StreamSettings::default();
+        assert_eq!(settings.resolution, Resolution::P1080);
+        assert_eq!(settings.fps, 60);
+        assert!(settings.motion_video);
+        assert_eq!(settings.dimensions(1920, 1080), (1920, 1080));
+        assert_eq!(level_fps(settings.fps, MAX_LEVEL), 60);
+    }
+
+    #[test]
+    fn still_pictures_do_not_count_as_slow_capture_or_encoding() {
+        // A still screen delivers no events and no new encoded packets.
+        assert!(!capture_is_lagging(0.0, 0, 60.0));
+        assert!(!encoder_is_lagging(0.0, 0.0, 60.0));
+        // A once-a-second clock is not a machine that cannot sustain 60 FPS.
+        assert!(!capture_is_lagging(1.0, 1, 60.0));
+        // Identical frames deliberately produce no packet (H.264 skip / unchanged
+        // tiles); handled frames include those skips.
+        assert!(!encoder_is_lagging(60.0, 60.0, 60.0));
+        // Real shortfalls still step the resolution down.
+        assert!(capture_is_lagging(30.0, 60, 60.0));
+        assert!(capture_is_lagging(5.0, 60, 60.0));
+        assert!(capture_is_lagging(30.0, 0, 60.0));
+        assert!(encoder_is_lagging(60.0, 20.0, 60.0));
+        assert!(!capture_is_lagging(58.0, 60, 60.0));
+        assert!(!encoder_is_lagging(30.0, 29.0, 60.0));
     }
 
     #[test]
@@ -1172,8 +1511,8 @@ mod tests {
             s.bitrate_kbps(2560, 1440),
         );
         assert_eq!(k720, 3000);
-        assert!((11_000..=13_000).contains(&k1080), "{k1080}");
-        assert!((19_000..=22_000).contains(&k1440), "{k1440}");
+        assert!((72_000..=74_000).contains(&k1080), "{k1080}");
+        assert_eq!(k1440, MAX_KBPS_LIMIT);
         let slow = StreamSettings { fps: 30, ..s };
         assert!(slow.bitrate_kbps(1920, 1080) < k1080);
         assert_eq!(s.bitrate_kbps(7680, 4320), MAX_KBPS_LIMIT);

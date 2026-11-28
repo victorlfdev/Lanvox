@@ -9,7 +9,13 @@
 use super::codec::PixelFormat;
 
 /// Converts tightly packed RGB channel layouts to NV12 (BT.601 limited range).
-fn pixels_to_nv12(pixels: &[u8], w: usize, h: usize, out: &mut Vec<u8>, format: PixelFormat) {
+pub(crate) fn pixels_to_nv12(
+    pixels: &[u8],
+    w: usize,
+    h: usize,
+    out: &mut Vec<u8>,
+    format: PixelFormat,
+) {
     use rayon::prelude::*;
     let (red, green, blue) = match format {
         PixelFormat::Rgba => (0, 1, 2),
@@ -57,7 +63,7 @@ fn has_nal(data: &[u8], kind: u8) -> bool {
 }
 
 #[cfg(windows)]
-pub use imp::HwEncoder;
+pub use imp::{GpuConvert, HwEncoder};
 
 #[cfg(not(windows))]
 pub struct HwEncoder;
@@ -93,9 +99,24 @@ mod imp {
     use std::mem::ManuallyDrop;
     use std::time::{Duration, Instant};
     use windows::core::{Interface, GUID};
+    use windows::Win32::Graphics::Direct3D11::{
+        ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
+        ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorOutputView,
+        D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+        D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+        D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CAPS,
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+        D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D,
+        D3D11_VPOV_DIMENSION_TEXTURE2D,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL};
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
     use windows::Win32::System::Variant::VARIANT;
+
+    use super::super::wgc::GpuFrame;
 
     /// Process-wide Media Foundation lifetime (MFStartup is reference counted).
     struct MfRuntime;
@@ -133,6 +154,9 @@ mod imp {
         nv12: Vec<u8>,
         ready: VecDeque<Vec<u8>>,
         empty_polls: u32,
+        need_wait: Duration,
+        out_wait: Duration,
+        gpu: Option<GpuConvert>,
         name: String,
         _runtime: MfRuntime,
     }
@@ -149,8 +173,276 @@ mod imp {
         }
     }
 
+    /// RGB→NV12 conversion on the GPU. The captured texture never leaves VRAM:
+    /// the video processor writes NV12 into a render target, which is then handed
+    /// to Media Foundation as a DXGI-surface-backed sample.
+    #[derive(Clone)]
+    pub struct GpuConvert {
+        device: ID3D11Device,
+        context: ID3D11DeviceContext,
+        video_device: ID3D11VideoDevice,
+        video_context: ID3D11VideoContext,
+        enumerator: ID3D11VideoProcessorEnumerator,
+        processor: ID3D11VideoProcessor,
+        /// The asynchronous MFT may still be reading a surface when the next
+        /// frame arrives, so rotate through several NV12 targets.
+        nv12: [Option<ID3D11Texture2D>; 3],
+        output_views: [Option<ID3D11VideoProcessorOutputView>; 3],
+        /// Reused for GPU→CPU NV12 readback; allocating one per frame stalls
+        /// the D3D11 device at 60 fps.
+        staging: Option<ID3D11Texture2D>,
+        next: usize,
+        size: (u32, u32),
+        manager: IMFDXGIDeviceManager,
+    }
+
+    impl GpuConvert {
+        pub fn new(
+            device: &ID3D11Device,
+            context: &ID3D11DeviceContext,
+            width: u32,
+            height: u32,
+            fps: u32,
+        ) -> Result<Self, String> {
+            let video_device: ID3D11VideoDevice =
+                device.cast().map_err(|e| err("video device", e))?;
+            let video_context: ID3D11VideoContext =
+                context.cast().map_err(|e| err("video context", e))?;
+            let rate = DXGI_RATIONAL {
+                Numerator: fps.max(1),
+                Denominator: 1,
+            };
+            let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+                InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                InputFrameRate: rate,
+                InputWidth: width,
+                InputHeight: height,
+                OutputFrameRate: rate,
+                OutputWidth: width,
+                OutputHeight: height,
+                Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
+            };
+            let enumerator = unsafe { video_device.CreateVideoProcessorEnumerator(&desc) }
+                .map_err(|e| err("video processor enumerator", e))?;
+            let mut caps = D3D11_VIDEO_PROCESSOR_CAPS::default();
+            unsafe { enumerator.GetVideoProcessorCaps(&mut caps) }
+                .map_err(|e| err("video processor caps", e))?;
+            let processor = unsafe { video_device.CreateVideoProcessor(&enumerator, 0) }
+                .map_err(|e| err("video processor", e))?;
+            let (mut reset_token, mut manager) = (0u32, None);
+            unsafe { MFCreateDXGIDeviceManager(&mut reset_token, &mut manager) }
+                .map_err(|e| err("DXGI device manager", e))?;
+            let manager = manager.ok_or("no DXGI device manager")?;
+            unsafe { manager.ResetDevice(device, reset_token) }
+                .map_err(|e| err("reset DXGI device", e))?;
+            Ok(Self {
+                device: device.clone(),
+                context: context.clone(),
+                video_device,
+                video_context,
+                enumerator,
+                processor,
+                nv12: [None, None, None],
+                output_views: [None, None, None],
+                staging: None,
+                next: 0,
+                size: (0, 0),
+                manager,
+            })
+        }
+
+        fn convert(
+            &mut self,
+            frame: &GpuFrame,
+            target_width: u32,
+            target_height: u32,
+        ) -> Result<ID3D11Texture2D, String> {
+            if self.size != (target_width, target_height) {
+                let td = D3D11_TEXTURE2D_DESC {
+                    Width: target_width,
+                    Height: target_height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_NV12,
+                    SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                let view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                    ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                    Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                        Texture2D: Default::default(),
+                    },
+                };
+                for slot in 0..self.nv12.len() {
+                    let mut texture = None;
+                    unsafe { self.device.CreateTexture2D(&td, None, Some(&mut texture)) }
+                        .map_err(|e| err("NV12 render target", e))?;
+                    let texture = texture.ok_or("no NV12 render target")?;
+                    let mut view = None;
+                    unsafe {
+                        self.video_device.CreateVideoProcessorOutputView(
+                            &texture,
+                            &self.enumerator,
+                            &view_desc,
+                            Some(&mut view),
+                        )
+                    }
+                    .map_err(|e| err("NV12 output view", e))?;
+                    self.output_views[slot] = view;
+                    self.nv12[slot] = Some(texture);
+                }
+                self.next = 0;
+                self.size = (target_width, target_height);
+                self.staging = None;
+            }
+            let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                FourCC: 0,
+                ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                    Texture2D: Default::default(),
+                },
+            };
+            let mut input_view = None;
+            unsafe {
+                self.video_device.CreateVideoProcessorInputView(
+                    &frame.texture,
+                    &self.enumerator,
+                    &input_desc,
+                    Some(&mut input_view),
+                )
+            }
+            .map_err(|e| err("capture input view", e))?;
+            let input_view = input_view.ok_or("no capture input view")?;
+            let index = self.next;
+            self.next = (self.next + 1) % self.nv12.len();
+            let output_view = self.output_views[index]
+                .clone()
+                .ok_or("no NV12 output view")?;
+            let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
+                Enable: windows::core::BOOL(1),
+                pInputSurface: std::mem::ManuallyDrop::new(Some(input_view)),
+                ..Default::default()
+            };
+            let blit = unsafe {
+                self.video_context.VideoProcessorBlt(
+                    &self.processor,
+                    &output_view,
+                    0,
+                    std::slice::from_ref(&stream),
+                )
+            }
+            .map_err(|e| err("RGB to NV12", e));
+            // The stream struct uses ManuallyDrop for COM pointers; release the
+            // per-frame input view explicitly or every frame leaks a D3D11 view.
+            unsafe { std::mem::ManuallyDrop::drop(&mut stream.pInputSurface) };
+            blit?;
+            // Submit the conversion before the encoder reads the surface.
+            unsafe { self.context.Flush() };
+            self.nv12[index]
+                .clone()
+                .ok_or("no NV12 render target".into())
+        }
+
+        /// Convert a captured texture to packed NV12 bytes. Vulkan Video encodes
+        /// from a buffer rather than a D3D11 surface, so this is the bridge
+        /// between Graphics Capture and that backend.
+        pub fn read_nv12(
+            &mut self,
+            frame: &GpuFrame,
+            width: u32,
+            height: u32,
+        ) -> Result<Vec<u8>, String> {
+            let texture = self.convert(frame, width, height)?;
+            if self.staging.is_none() {
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                unsafe { texture.GetDesc(&mut desc) };
+                desc.Usage = D3D11_USAGE_STAGING;
+                desc.BindFlags = 0;
+                desc.MiscFlags = 0;
+                desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+                let mut staging = None;
+                unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut staging)) }
+                    .map_err(|e| err("NV12 staging texture", e))?;
+                self.staging = staging;
+            }
+            let staging = self
+                .staging
+                .clone()
+                .ok_or("no NV12 staging texture".to_string())?;
+            unsafe { self.context.CopyResource(&staging, &texture) };
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            unsafe {
+                self.context
+                    .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                    .map_err(|e| err("NV12 staging map", e))?;
+            }
+            let pitch = mapped.RowPitch as usize;
+            let y_size = width as usize * height as usize;
+            let mut out = vec![0u8; y_size * 3 / 2];
+            unsafe {
+                let src = std::slice::from_raw_parts(
+                    mapped.pData as *const u8,
+                    pitch * height as usize * 3 / 2,
+                );
+                for row in 0..height as usize {
+                    let start = row * width as usize;
+                    out[start..start + width as usize]
+                        .copy_from_slice(&src[row * pitch..row * pitch + width as usize]);
+                }
+                let uv_base = pitch * height as usize;
+                for row in 0..height as usize / 2 {
+                    let start = y_size + row * width as usize;
+                    out[start..start + width as usize].copy_from_slice(
+                        &src[uv_base + row * pitch..uv_base + row * pitch + width as usize],
+                    );
+                }
+                self.context.Unmap(&staging, 0);
+            }
+            Ok(out)
+        }
+
+        fn sample(&self, texture: &ID3D11Texture2D) -> Result<IMFSample, String> {
+            let buffer =
+                unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, false) }
+                    .map_err(|e| err("DXGI surface buffer", e))?;
+            let sample = unsafe { MFCreateSample().map_err(|e| err("MFCreateSample", e))? };
+            unsafe { sample.AddBuffer(&buffer).map_err(|e| err("AddBuffer", e))? };
+            Ok(sample)
+        }
+    }
+
     impl HwEncoder {
         pub fn new(width: u32, height: u32, fps: u32, bitrate: u32) -> Result<Self, String> {
+            Self::new_impl(width, height, fps, bitrate, None)
+        }
+
+        /// Hardware encoder fed by GPU textures: the picture is converted to
+        /// NV12 on the GPU and the MFT reads it from a DXGI surface.
+        pub fn new_with_device(
+            width: u32,
+            height: u32,
+            fps: u32,
+            bitrate: u32,
+            device: &ID3D11Device,
+            context: &ID3D11DeviceContext,
+        ) -> Result<Self, String> {
+            let gpu = GpuConvert::new(device, context, width, height, fps)?;
+            Self::new_impl(width, height, fps, bitrate, Some(&gpu))
+        }
+
+        fn new_impl(
+            width: u32,
+            height: u32,
+            fps: u32,
+            bitrate: u32,
+            gpu: Option<&GpuConvert>,
+        ) -> Result<Self, String> {
             // Keeps Media Foundation alive while enumerating; each opened
             // encoder holds its own reference.
             let _runtime = MfRuntime::start()?;
@@ -188,7 +480,7 @@ mod imp {
                 }
                 let mut last_error = String::new();
                 for activate in activates {
-                    match Self::open(&activate, width, height, fps, bitrate) {
+                    match Self::open(&activate, width, height, fps, bitrate, gpu) {
                         Ok(mut enc) => {
                             enc.name = friendly_name(&activate);
                             return Ok(enc);
@@ -206,6 +498,7 @@ mod imp {
             height: u32,
             fps: u32,
             bitrate: u32,
+            gpu: Option<&GpuConvert>,
         ) -> Result<Self, String> {
             let runtime = MfRuntime::start()?;
             let mft: IMFTransform = activate
@@ -222,6 +515,11 @@ mod imp {
                 }
                 let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
             }
+            // The D3D manager can only be attached after the async MFT is unlocked.
+            if let Some(gpu) = gpu {
+                mft.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, gpu.manager.as_raw() as usize)
+                    .map_err(|e| err("SET_D3D_MANAGER", e))?;
+            }
             let events = if is_async {
                 Some(
                     mft.cast::<IMFMediaEventGenerator>()
@@ -235,7 +533,12 @@ mod imp {
             set_codec(
                 &codec,
                 &CODECAPI_AVEncCommonRateControlMode,
-                VARIANT::from(eAVEncCommonRateControlMode_LowDelayVBR.0 as u32),
+                // LowDelayVBR builds a delay buffer that saturates after a few
+                // seconds of full motion and then throttles input to ~25 fps.
+                // UnconstrainedVBR keeps accepting frames at the requested rate.
+                // UnconstrainedVBR avoids the delay buffer that LowDelayVBR
+                // builds up under sustained motion.
+                VARIANT::from(eAVEncCommonRateControlMode_UnconstrainedVBR.0 as u32),
             );
             set_codec(
                 &codec,
@@ -350,11 +653,22 @@ mod imp {
                 nv12: Vec::new(),
                 ready: VecDeque::new(),
                 empty_polls: 0,
+                need_wait: Duration::ZERO,
+                out_wait: Duration::ZERO,
+                gpu: gpu.cloned(),
                 name: String::new(),
                 _runtime: runtime,
             };
             enc.refresh_sequence_header();
             Ok(enc)
+        }
+
+        /// Waiting times for the last frames, in milliseconds: NeedInput and output.
+        pub fn take_waits(&mut self) -> (f32, f32) {
+            (
+                std::mem::take(&mut self.need_wait).as_secs_f32() * 1000.0,
+                std::mem::take(&mut self.out_wait).as_secs_f32() * 1000.0,
+            )
         }
 
         pub fn size(&self) -> (u32, u32) {
@@ -411,6 +725,30 @@ mod imp {
                 return Err("Tamanho de quadro inesperado para o encoder de GPU".into());
             }
             pixels_to_nv12(pixels, w, h, &mut self.nv12, format);
+            let sample = unsafe { self.make_sample()? };
+            self.process_sample(sample, force)
+        }
+
+        /// Encode a captured texture without copying the picture to CPU memory.
+        pub fn encode_texture(
+            &mut self,
+            frame: &GpuFrame,
+            force: bool,
+        ) -> Result<Option<(Vec<u8>, bool)>, String> {
+            if (frame.width, frame.height) != (self.width, self.height) {
+                return Err("Tamanho de quadro inesperado para o encoder de GPU".into());
+            }
+            let convert = self.gpu.as_mut().ok_or("Conversão de GPU indisponível")?;
+            let texture = convert.convert(frame, self.width, self.height)?;
+            let sample = convert.sample(&texture)?;
+            self.process_sample(sample, force)
+        }
+
+        fn process_sample(
+            &mut self,
+            sample: IMFSample,
+            force: bool,
+        ) -> Result<Option<(Vec<u8>, bool)>, String> {
             unsafe {
                 if force && self.frame_index > 0 {
                     set_codec(
@@ -419,12 +757,20 @@ mod imp {
                         VARIANT::from(1u32),
                     );
                 }
-                let sample = self.make_sample()?;
+                let duration = 10_000_000i64 / self.fps as i64;
+                sample
+                    .SetSampleTime(self.frame_index * duration)
+                    .map_err(|e| err("SetSampleTime", e))?;
+                sample
+                    .SetSampleDuration(duration)
+                    .map_err(|e| err("SetSampleDuration", e))?;
                 // An async MFT announces when it wants input.
                 let deadline = Instant::now() + Duration::from_millis(500);
+                let need_started = Instant::now();
                 while self.pending_need == 0 {
                     self.pump(deadline)?;
                 }
+                self.need_wait += need_started.elapsed();
                 self.mft
                     .ProcessInput(0, &sample, 0)
                     .map_err(|e| err("ProcessInput", e))?;
@@ -435,9 +781,11 @@ mod imp {
                     self.pending_need = 1;
                 } else {
                     let deadline = Instant::now() + Duration::from_millis(250);
+                    let out_started = Instant::now();
                     while self.ready.is_empty() && Instant::now() < deadline {
                         self.pump(deadline)?;
                     }
+                    self.out_wait += out_started.elapsed();
                 }
             }
             let Some(mut data) = self.ready.pop_front() else {
@@ -603,6 +951,27 @@ mod imp {
             assert_eq!(out.len(), 8 * 4 * 3 / 2);
             assert!(out[..32].iter().all(|v| (125..=127).contains(v)));
             assert!(out[32..].iter().all(|v| (127..=129).contains(v)));
+        }
+
+        #[test]
+        #[ignore = "manual 1080p RGB to NV12 conversion benchmark"]
+        fn benchmark_pixels_to_nv12() {
+            let (w, h) = (1920usize, 1080usize);
+            let pixels = vec![128u8; w * h * 4];
+            let mut out = Vec::new();
+            let mut timings = Vec::new();
+            for _ in 0..60 {
+                let start = std::time::Instant::now();
+                pixels_to_nv12(&pixels, w, h, &mut out, PixelFormat::Bgra);
+                timings.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            timings.sort_by(f64::total_cmp);
+            eprintln!(
+                "NV12 1080p: mean {:.2} ms, p50 {:.2} ms, p95 {:.2} ms",
+                timings.iter().sum::<f64>() / timings.len() as f64,
+                timings[30],
+                timings[57]
+            );
         }
     }
 }

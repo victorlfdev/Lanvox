@@ -75,6 +75,47 @@ pub fn scale_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     if sw == dw && sh == dh {
         return src.to_vec();
     }
+    scale_channels(src, sw, sh, dw, dh, (0, 1, 2), false)
+}
+
+/// Bilinear scale straight into RGBA. The UI only consumes RGBA, so folding the
+/// channel swap into the scaling pass avoids a second full-size copy of the
+/// picture (a real cost at preview cadence).
+pub fn scale_to_rgba(
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+    dw: u32,
+    dh: u32,
+    format: PixelFormat,
+) -> Vec<u8> {
+    if sw == dw && sh == dh {
+        return into_rgba(src, format);
+    }
+    let (red, green, blue) = match format {
+        PixelFormat::Rgba => (0, 1, 2),
+        PixelFormat::Bgra => (2, 1, 0),
+    };
+    scale_channels(
+        src,
+        sw,
+        sh,
+        dw,
+        dh,
+        (red, green, blue),
+        format == PixelFormat::Bgra,
+    )
+}
+
+fn scale_channels(
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+    dw: u32,
+    dh: u32,
+    channels: (usize, usize, usize),
+    opaque: bool,
+) -> Vec<u8> {
     let mut out = vec![0u8; (dw * dh * 4) as usize];
     let x_ratio = sw as f32 / dw as f32;
     let y_ratio = sh as f32 / dh as f32;
@@ -97,10 +138,17 @@ pub fn scale_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
             let r0 = &src[(y0 * sw * 4) as usize..((y0 + 1) * sw * 4) as usize];
             let r1 = &src[(y1 * sw * 4) as usize..((y1 + 1) * sw * 4) as usize];
             for (x, &(a, b, tx)) in xs.iter().enumerate() {
-                for c in 0..4 {
+                for (dst, &c) in [channels.0, channels.1, channels.2].iter().enumerate() {
                     let top = r0[a + c] as f32 * (1.0 - tx) + r0[b + c] as f32 * tx;
                     let bot = r1[a + c] as f32 * (1.0 - tx) + r1[b + c] as f32 * tx;
-                    row[x * 4 + c] = (top * (1.0 - ty) + bot * ty + 0.5) as u8;
+                    row[x * 4 + dst] = (top * (1.0 - ty) + bot * ty + 0.5) as u8;
+                }
+                if opaque {
+                    row[x * 4 + 3] = 255;
+                } else {
+                    let top = r0[a + 3] as f32 * (1.0 - tx) + r0[b + 3] as f32 * tx;
+                    let bot = r1[a + 3] as f32 * (1.0 - tx) + r1[b + 3] as f32 * tx;
+                    row[x * 4 + 3] = (top * (1.0 - ty) + bot * ty + 0.5) as u8;
                 }
             }
         });
@@ -275,5 +323,24 @@ mod tests {
     fn odd_aspect_uses_fallback_or_aligned() {
         let (w, h) = fit_resolution(1366, 768, 1280 * 720);
         assert!((w as u64) * (h as u64) <= 1280 * 720);
+    }
+
+    #[test]
+    fn fused_scaling_matches_scale_then_convert() {
+        let (sw, sh, dw, dh) = (16, 12, 7, 5);
+        let pixels: Vec<u8> = (0..sw * sh * 4).map(|i| ((i * 37) % 256) as u8).collect();
+        for format in [PixelFormat::Rgba, PixelFormat::Bgra] {
+            let expected = scale_rgba(&into_rgba(&pixels, format), sw, sh, dw, dh);
+            assert_eq!(
+                scale_to_rgba(&pixels, sw, sh, dw, dh, format),
+                expected,
+                "{format:?}"
+            );
+            // The same-size path must still convert the channel order.
+            assert_eq!(
+                scale_to_rgba(&pixels, sw, sh, sw, sh, format),
+                into_rgba(&pixels, format)
+            );
+        }
     }
 }

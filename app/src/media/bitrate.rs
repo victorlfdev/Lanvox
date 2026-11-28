@@ -4,7 +4,10 @@ use crate::model::StreamKind;
 pub const SCREEN_MIN_BPS: u32 = 6_000_000;
 pub const SCREEN_LOW_BPS: u32 = 3_000_000;
 pub const CAMERA_MIN_BPS: u32 = 1_000_000;
-pub const DEFAULT_HOST_VIDEO_BPS: u64 = 72_000_000;
+/// A 1080p60 screen with whole-screen motion needs roughly 70 Mb/s to avoid
+/// pacing frames out. Five cameras plus two such screens, each seen by four
+/// viewers, need about 660 Mb/s; reserve headroom over that floor.
+pub const DEFAULT_HOST_VIDEO_BPS: u64 = 800_000_000;
 
 pub fn minimum(kind: StreamKind) -> u32 {
     match kind {
@@ -35,11 +38,11 @@ pub fn ceiling(kind: StreamKind, width: u32, height: u32, fps: u32) -> u32 {
                 16..=30 => 75,
                 _ => 100,
             };
-            pixels.saturating_mul(5800).saturating_mul(percent) / 100_000
+            pixels.saturating_mul(35000).saturating_mul(percent) / 100_000
         }
         StreamKind::Camera => pixels.saturating_mul(3).min(6_000_000),
     };
-    rate.clamp(u64::from(minimum(kind)), 40_000_000) as u32
+    rate.clamp(u64::from(minimum(kind)), 80_000_000) as u32
 }
 
 /// (kind, maximum per source, number of remote copies). Never violates floors,
@@ -83,7 +86,11 @@ impl Controller {
     pub fn new(kind: StreamKind, maximum: u32, now: std::time::Instant) -> Self {
         Self {
             kind,
-            target: minimum_for_ceiling(kind, maximum),
+            // Start at the ceiling: it is a limit, not forced bandwidth. A still
+            // picture still uses almost nothing, while a moving 1080p60 screen
+            // must be free to spend enough bits from the first frame instead of
+            // spending five seconds ramping up from the floor and dropping frames.
+            target: maximum.max(minimum_for_ceiling(kind, maximum)),
             max: maximum.max(minimum_for_ceiling(kind, maximum)),
             clean: 0,
             last: now,
@@ -104,7 +111,7 @@ impl Controller {
         healthy: bool,
         now: std::time::Instant,
     ) -> u32 {
-        self.max = maximum.clamp(minimum_for_ceiling(self.kind, maximum), 40_000_000);
+        self.max = maximum.clamp(minimum_for_ceiling(self.kind, maximum), 80_000_000);
         self.target = self.target.clamp(self.floor(), self.max);
         if now.saturating_duration_since(self.last) < std::time::Duration::from_secs(1) {
             return self.target;
@@ -157,8 +164,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(ceiling(StreamKind::Screen, 1920, 1080, 60), 12_026_880);
-        assert_eq!(ceiling(StreamKind::Screen, 2560, 1440, 60), 21_381_120);
+        assert_eq!(ceiling(StreamKind::Screen, 1920, 1080, 60), 72_576_000);
+        assert_eq!(ceiling(StreamKind::Screen, 2560, 1440, 60), 80_000_000);
         assert_eq!(
             minimum_for_ceiling(StreamKind::Screen, 12_026_880),
             SCREEN_MIN_BPS
@@ -185,6 +192,24 @@ mod tests {
             assert_eq!(*limit, minimum_for_ceiling(*kind, *max));
         }
         assert!(allocate(&streams, 43_000_000).1);
+    }
+
+    #[test]
+    fn two_1080p60_screens_fit_the_default_host_budget() {
+        let screen = ceiling(StreamKind::Screen, 1920, 1080, 60);
+        let camera = ceiling(StreamKind::Camera, 1280, 720, 30);
+        let mut streams = vec![(StreamKind::Camera, camera, 4); 5];
+        streams.extend([(StreamKind::Screen, screen, 4); 2]);
+        let floor: u64 = streams
+            .iter()
+            .map(|(kind, max, copies)| u64::from(minimum_for_ceiling(*kind, *max)) * *copies as u64)
+            .sum();
+        assert!(floor <= DEFAULT_HOST_VIDEO_BPS);
+        let (limits, insufficient) = allocate(&streams, DEFAULT_HOST_VIDEO_BPS);
+        assert!(!insufficient);
+        // Every stream gets its full 1080p60 allowance with four viewers.
+        assert_eq!(limits[5], screen);
+        assert_eq!(limits[6], screen);
     }
 
     #[test]

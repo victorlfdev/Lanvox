@@ -8,6 +8,8 @@
 //! encoder and decoder refuse to start and video uses JPEG instead.
 
 use super::codec::PixelFormat;
+#[cfg(windows)]
+use super::wgc::GpuFrame;
 use crate::protocol::{picture_bytes, EncodedVideoFrame, MAX_VIDEO_PIXELS, MAX_VIDEO_SIDE};
 use openh264::decoder::{Decoder, DecoderConfig};
 use openh264::encoder::{
@@ -15,11 +17,97 @@ use openh264::encoder::{
     RateControlMode, UsageType,
 };
 use openh264::formats::{BgraSliceU8, RgbaSliceU8, YUVBuffer, YUVSource};
+#[cfg(windows)]
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
+
+/// Common interface for hardware backends. Vulkan Video is preferred on
+/// Windows; Media Foundation remains as the fallback for drivers without
+/// Vulkan video encoding.
+trait HwBackend {
+    fn name(&self) -> String;
+    fn size(&self) -> (u32, u32);
+    fn set_bitrate(&mut self, bitrate: u32) -> Result<(), String>;
+    fn encode(
+        &mut self,
+        pixels: &[u8],
+        format: PixelFormat,
+        force: bool,
+    ) -> Result<Option<(Vec<u8>, bool)>, String>;
+    #[cfg(windows)]
+    fn encode_texture(
+        &mut self,
+        frame: &GpuFrame,
+        force: bool,
+    ) -> Result<Option<(Vec<u8>, bool)>, String>;
+    fn take_waits(&mut self) -> (f32, f32);
+}
+
+impl HwBackend for super::hw_h264::HwEncoder {
+    fn name(&self) -> String {
+        self.name().to_string()
+    }
+    fn size(&self) -> (u32, u32) {
+        self.size()
+    }
+    fn set_bitrate(&mut self, bitrate: u32) -> Result<(), String> {
+        self.set_bitrate(bitrate)
+    }
+    fn encode(
+        &mut self,
+        pixels: &[u8],
+        format: PixelFormat,
+        force: bool,
+    ) -> Result<Option<(Vec<u8>, bool)>, String> {
+        self.encode(pixels, format, force)
+    }
+    #[cfg(windows)]
+    fn encode_texture(
+        &mut self,
+        frame: &GpuFrame,
+        force: bool,
+    ) -> Result<Option<(Vec<u8>, bool)>, String> {
+        self.encode_texture(frame, force)
+    }
+    fn take_waits(&mut self) -> (f32, f32) {
+        self.take_waits()
+    }
+}
+
+#[cfg(windows)]
+impl HwBackend for super::vulkan_h264::VulkanEncoder {
+    fn name(&self) -> String {
+        self.name().to_string()
+    }
+    fn size(&self) -> (u32, u32) {
+        self.size()
+    }
+    fn set_bitrate(&mut self, bitrate: u32) -> Result<(), String> {
+        self.set_bitrate(bitrate)
+    }
+    fn encode(
+        &mut self,
+        pixels: &[u8],
+        format: PixelFormat,
+        force: bool,
+    ) -> Result<Option<(Vec<u8>, bool)>, String> {
+        self.encode(pixels, format, force)
+    }
+    fn encode_texture(
+        &mut self,
+        frame: &GpuFrame,
+        force: bool,
+    ) -> Result<Option<(Vec<u8>, bool)>, String> {
+        self.encode_texture(frame, force)
+    }
+    fn take_waits(&mut self) -> (f32, f32) {
+        self.take_waits()
+    }
+}
 
 enum HwState {
     Untried,
     /// The bool is whether the first IDR was checked against our own decoder.
-    Active(super::hw_h264::HwEncoder, bool),
+    Active(Box<dyn HwBackend>, bool),
     Off,
 }
 
@@ -40,6 +128,11 @@ pub struct TemporalEncoder {
     cpu_size: Option<(u32, u32)>,
     cpu_bitrate: u32,
     hw: HwState,
+    /// Accumulated GPU encoder waits (NeedInput, output) since last read, in ms.
+    hw_need_ms: f32,
+    hw_out_ms: f32,
+    #[cfg(windows)]
+    gpu_device: Option<(ID3D11Device, ID3D11DeviceContext)>,
 }
 
 impl TemporalEncoder {
@@ -48,6 +141,104 @@ impl TemporalEncoder {
         match &self.hw {
             HwState::Active(hw, _) => format!("GPU: {}", hw.name()),
             _ => "CPU".into(),
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn has_gpu_texture(&self) -> bool {
+        self.gpu_device.is_some()
+    }
+
+    /// GPU encoder event waits since the last call, in milliseconds.
+    #[cfg(test)]
+    pub fn take_hw_waits(&mut self) -> (f32, f32) {
+        (
+            std::mem::take(&mut self.hw_need_ms),
+            std::mem::take(&mut self.hw_out_ms),
+        )
+    }
+
+    #[cfg(windows)]
+    pub fn new_with_device(
+        bitrate: u32,
+        fps: u32,
+        screen: bool,
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+    ) -> Result<Self, String> {
+        let mut encoder = Self::new(bitrate, fps, screen)?;
+        encoder.gpu_device = Some((device.clone(), context.clone()));
+        Ok(encoder)
+    }
+
+    fn create_hardware(&self, width: u32, height: u32) -> Result<Box<dyn HwBackend>, String> {
+        #[cfg(windows)]
+        if let Some((device, context)) = &self.gpu_device {
+            // Vulkan Video uses a separate driver path from Media Foundation.
+            // Prefer it: the MF MFT on some AMD drivers stalls after a few
+            // seconds of 1080p60 motion. Keep the MFT as the fallback.
+            match super::vulkan_h264::VulkanEncoder::new(
+                width,
+                height,
+                self.fps,
+                self.bitrate,
+                device,
+                context,
+            ) {
+                Ok(encoder) => return Ok(Box::new(encoder)),
+                Err(error) => {
+                    eprintln!("Vulkan Video indisponível, usando Media Foundation: {error}")
+                }
+            }
+            return Ok(Box::new(super::hw_h264::HwEncoder::new_with_device(
+                width,
+                height,
+                self.fps,
+                self.bitrate,
+                device,
+                context,
+            )?));
+        }
+        Ok(Box::new(super::hw_h264::HwEncoder::new(
+            width,
+            height,
+            self.fps,
+            self.bitrate,
+        )?))
+    }
+
+    /// GPU texture variant of the hardware encoder path.
+    #[cfg(windows)]
+    pub fn encode_texture(
+        &mut self,
+        frame: &GpuFrame,
+        force: bool,
+    ) -> Result<Option<EncodedVideoFrame>, String> {
+        if !frame.width.is_multiple_of(2) || !frame.height.is_multiple_of(2) {
+            return Err("Dimensões inválidas para vídeo H.264".into());
+        }
+        if matches!(self.hw, HwState::Active(ref hw, _) if hw.size() != (frame.width, frame.height))
+        {
+            self.hw = HwState::Untried;
+        }
+        if matches!(self.hw, HwState::Untried) {
+            self.hw = match self.create_hardware(frame.width, frame.height) {
+                Ok(hw) => HwState::Active(hw, false),
+                Err(error) => {
+                    eprintln!("H.264 por GPU indisponível, usando CPU: {error}");
+                    HwState::Off
+                }
+            };
+        }
+        if crate::branding::env_flag("LANVOX_H264_SOFTWARE") {
+            self.hw = HwState::Off;
+        }
+        let result = self.encode_hw_common(frame.width, frame.height, |hw| {
+            hw.encode_texture(frame, force)
+        });
+        match result {
+            Some(result) => result,
+            None => Ok(None),
         }
     }
 
@@ -66,7 +257,7 @@ impl TemporalEncoder {
             self.hw = HwState::Untried;
         }
         if matches!(self.hw, HwState::Untried) {
-            self.hw = match super::hw_h264::HwEncoder::new(width, height, self.fps, self.bitrate) {
+            self.hw = match self.create_hardware(width, height) {
                 Ok(hw) => HwState::Active(hw, false),
                 Err(error) => {
                     eprintln!("H.264 por GPU indisponível, usando CPU: {error}");
@@ -74,12 +265,24 @@ impl TemporalEncoder {
                 }
             };
         }
+        self.encode_hw_common(width, height, |hw| hw.encode(pixels, format, force))
+    }
+
+    fn encode_hw_common<F>(
+        &mut self,
+        width: u32,
+        height: u32,
+        encode: F,
+    ) -> Option<Result<Option<EncodedVideoFrame>, String>>
+    where
+        F: FnOnce(&mut dyn HwBackend) -> Result<Option<(Vec<u8>, bool)>, String>,
+    {
         let HwState::Active(hw, verified) = &mut self.hw else {
             return None;
         };
         let outcome = match hw
             .set_bitrate(self.bitrate)
-            .and_then(|()| hw.encode(pixels, format, force))
+            .and_then(|()| encode(hw.as_mut()))
         {
             Ok(Some((data, keyframe))) => {
                 if data.len() > 2 * 1024 * 1024 {
@@ -94,11 +297,21 @@ impl TemporalEncoder {
                     };
                     // The first picture must decode with the same strict
                     // validation the receivers apply, otherwise stay on CPU.
-                    let valid = *verified
-                        || (keyframe
-                            && TemporalDecoder::new()
-                                .and_then(|mut decoder| decoder.decode(&frame))
-                                .is_ok_and(|picture| picture.is_some()));
+                    let valid = if *verified {
+                        true
+                    } else if keyframe {
+                        match TemporalDecoder::new().and_then(|mut decoder| decoder.decode(&frame))
+                        {
+                            Ok(Some(_)) => true,
+                            Ok(None) => false,
+                            Err(error) => {
+                                eprintln!("Encoder de GPU: IDR rejeitado ({error})");
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
                     if valid {
                         *verified = true;
                         Ok(Some(frame))
@@ -110,6 +323,9 @@ impl TemporalEncoder {
             Ok(None) => Ok(None),
             Err(error) => Err(error),
         };
+        let (need_ms, out_ms) = hw.take_waits();
+        self.hw_need_ms += need_ms;
+        self.hw_out_ms += out_ms;
         match outcome {
             Ok(frame) => {
                 if let Some(frame) = &frame {
@@ -146,7 +362,7 @@ impl TemporalEncoder {
 
     /// Applied on the next encode, in place on GPU and initialized CPU encoders.
     pub fn set_bitrate(&mut self, bitrate: u32) {
-        self.bitrate = bitrate.clamp(128_000, 40_000_000);
+        self.bitrate = bitrate.clamp(128_000, 80_000_000);
     }
 
     pub fn new(bitrate: u32, fps: u32, screen: bool) -> Result<Self, String> {
@@ -154,12 +370,16 @@ impl TemporalEncoder {
         Ok(Self {
             encoder,
             sequence: 0,
-            bitrate: bitrate.clamp(128_000, 40_000_000),
+            bitrate: bitrate.clamp(128_000, 80_000_000),
             fps: fps.clamp(1, 60),
             screen,
             cpu_size: None,
             cpu_bitrate: bitrate.clamp(128_000, 40_000_000),
             hw: HwState::Untried,
+            hw_need_ms: 0.0,
+            hw_out_ms: 0.0,
+            #[cfg(windows)]
+            gpu_device: None,
         })
     }
 
@@ -385,13 +605,17 @@ fn valid_pps(nal: &[u8]) -> bool {
     let Some(mut bits) = nal.get(1..).and_then(Bits::new) else {
         return false;
     };
-    // No FMO/ASO, CABAC or large reference arrays are emitted by our baseline
-    // encoder. Refuse those extensions before calling the native library.
+    // No FMO/ASO or large reference arrays. CABAC is a standard H.264 entropy
+    // mode and is accepted: the Vulkan hardware encoder emits it even with a
+    // Baseline SPS, and receivers must decode those frames. SPS dimensions and
+    // reference counts stay bounded before the native decoder is called.
+    let pps_id = bits.ue();
+    let sps_id = bits.ue();
+    let _entropy_flag = bits.bits(1);
     matches!(
         (
-            bits.ue(),
-            bits.ue(),
-            bits.bits(1),
+            pps_id,
+            sps_id,
             bits.bits(1),
             bits.ue(),
             bits.ue(),
@@ -400,7 +624,6 @@ fn valid_pps(nal: &[u8]) -> bool {
         (
             Some(0..=255),
             Some(0..=31),
-            Some(0),
             Some(_),
             Some(0),
             Some(0..=3),
@@ -535,6 +758,15 @@ impl TemporalDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vulkan_cabac_pps_is_accepted_with_bounded_references() {
+        // The Vulkan encoder writes CABAC even with a Baseline SPS; receivers
+        // must accept it while still rejecting unbounded reference arrays.
+        let pps = [0x68, 0xee, 0x3c, 0x80];
+        assert!(valid_pps(&pps));
+        assert!(!valid_pps(&[0x68]));
+    }
 
     #[test]
     fn live_bitrate_changes_preserve_sequence_and_decode_on_cpu_and_available_gpu() {

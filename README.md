@@ -24,7 +24,7 @@ Para hospedar pelo desktop, selecione a interface que aceitará conexões e inic
 - Perfil, avatar e presença; notificações e bandeja no Windows.
 - Chamadas e salas de voz, mute/deafen, volume individual, PTT, dispositivos e teste de microfone.
 - Opus, jitter adaptável, recuperação de perdas, cancelamento de eco AEC3 e supressão de ruído via Sonora.
-- H.264 para movimento (GPU pelo Media Foundation quando disponível, senão CPU), regiões JPEG para texto, qualidade adaptável e diagnóstico de FPS/filas/bitrate. O H.264 usa o binário OpenH264 oficial da Cisco, baixado da Cisco na primeira execução e verificado por SHA-256; pode ser desativado em Configurações › Vídeo, e sem ele o vídeo usa JPEG.
+- H.264 para movimento (GPU por Vulkan Video com fallback para Media Foundation e CPU), regiões JPEG para texto, qualidade adaptável e diagnóstico de FPS/filas/bitrate. O H.264 usa o binário OpenH264 oficial da Cisco, baixado da Cisco na primeira execução e verificado por SHA-256; pode ser desativado em Configurações › Vídeo, e sem ele o vídeo usa JPEG.
 - Áudio estéreo do aplicativo compartilhado no Windows com suporte a process loopback. Capturar uma tela exclui o próprio Lanvox para não retransmitir a chamada. É uma opção explícita no seletor.
 - Conexão assíncrona, reconexão com backoff e dados locais separados por identidade e host.
 
@@ -82,15 +82,15 @@ Isso imprime (ou, com `--copy`, copia no Windows) `lanvox://ENDERECO:PORTA?token
 
 `--check` verifica apenas alcance TCP. Em VPN roteada, use endereço/DNS ou convite: broadcast local não é garantido. Configure as duas portas no firewall e na VPN. Não é necessário publicar diretamente na internet.
 
-Variáveis: `LANVOX_NAME`, `LANVOX_BIND`, `LANVOX_PORT`, `LANVOX_DATA`, `LANVOX_CONFIG`, `LANVOX_OWNER_KEY`, `LANVOX_REGISTRATION_TOKEN_FILE`, `LANVOX_MAX_CONNECTIONS`, `LANVOX_VIDEO_BUDGET_MBPS`. Segredos de entrada são lidos de arquivo. Veja [Docker](app/DOCKER.md).
+Variáveis: `LANVOX_NAME`, `LANVOX_BIND`, `LANVOX_PORT`, `LANVOX_DATA`, `LANVOX_CONFIG`, `LANVOX_OWNER_KEY`, `LANVOX_REGISTRATION_TOKEN_FILE`, `LANVOX_MAX_CONNECTIONS`, `LANVOX_VIDEO_BUDGET_MBPS`, `LANVOX_CPU_CAPTURE` (força a leitura de tela pela CPU), `LANVOX_H264_SOFTWARE` (força H.264 por CPU). Segredos de entrada são lidos de arquivo. Veja [Docker](app/DOCKER.md).
 
 ### Bitrate de vídeo adaptável
 
-Compartilhamento em **480p e 720p usa alvo de 3 Mb/s**, em qualquer FPS disponível. Em resoluções maiores, a tela começa em **6 Mb/s**; câmera começa em **1 Mb/s**. Source/Original segue o tamanho efetivo da origem. Esses são alvos, sem preenchimento artificial de banda: conteúdo estático pode consumir menos. Nos perfis com margem de crescimento, o alvo diminui com perdas/filas e aumenta 5% após cinco segundos saudáveis, limitado pela resolução escolhida e pelo orçamento do host. Os ajustes H.264 ocorrem no encoder em execução; se o driver rejeitar a mudança, há fallback para CPU com novo quadro-chave.
+Compartilhamento em **480p e 720p usa alvo de 3 Mb/s**, em qualquer FPS disponível. Em resoluções maiores, a tela começa no limite da resolução (cerca de **72 Mb/s em 1080p60**); câmera começa em **1 Mb/s**. Source/Original segue o tamanho efetivo da origem. Esses são tetos, sem preenchimento artificial de banda: conteúdo estático pode consumir menos. O alvo diminui com perdas/filas e volta a subir 5% após cinco segundos saudáveis, limitado pela resolução escolhida e pelo orçamento do host. Os ajustes H.264 ocorrem no encoder em execução; se o driver rejeitar a mudança, há fallback para CPU com novo quadro-chave.
 
-O host divide por padrão **72 Mb/s de vídeo**, contabilizando cada cópia enviada aos espectadores. Configure outro orçamento com `LANVOX_VIDEO_BUDGET_MBPS` (inteiro em Mb/s, de 1 a 100000). Reserve banda adicional para áudio, cabeçalhos, rajadas e outros serviços: o orçamento distribui alvos médios, não mede automaticamente a capacidade da internet nem é um limitador rígido de pacotes.
+O host divide por padrão **800 Mb/s de vídeo**, contabilizando cada cópia enviada aos espectadores. Configure outro orçamento com `LANVOX_VIDEO_BUDGET_MBPS` (inteiro em Mb/s, de 1 a 100000). Reserve banda adicional para áudio, cabeçalhos, rajadas e outros serviços: o orçamento distribui alvos médios, não mede automaticamente a capacidade da internet nem é um limitador rígido de pacotes.
 
-Cinco participantes com cinco câmeras e duas telas em 1080p60, todos assistindo aos outros quatro, exigem pelo menos **68 Mb/s de vídeo na saída do host**. Com as duas telas em 480p/720p, o mínimo cai para **44 Mb/s**. Se a soma dos pisos ultrapassar o orçamento, eles são preservados e aparece um aviso nos diagnósticos de vídeo; a fluidez deixa de ser garantida.
+Cinco participantes com cinco câmeras e duas telas em 1080p60, todos assistindo aos outros quatro, exigem pelo menos **660 Mb/s de vídeo na saída do host**. Com as duas telas em 480p/720p, o mínimo cai para **44 Mb/s**. Se a soma dos pisos ultrapassar o orçamento, eles são preservados e aparece um aviso nos diagnósticos de vídeo; a fluidez deixa de ser garantida.
 
 Feedback autenticado dos espectadores considera falhas de decodificação/recuperação e atraso na fila do decoder. O host também considera filas e descartes no encaminhamento. Aumentos exigem feedback recente de todos os espectadores; reportes antigos ou ausentes não autorizam crescimento. A adaptação de resolução/FPS continua disponível, com redução por congestionamento somente após persistência no piso. Isso não substitui os testes com dispositivos, jogos e rede reais.
 

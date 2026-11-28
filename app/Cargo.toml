@@ -1,6 +1,6 @@
 [package]
 name = "lanvox"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 description = "Voice, video, text and screen sharing over the local network"
 license = "Apache-2.0"
@@ -9,7 +9,7 @@ license = "Apache-2.0"
 default = ["gui"]
 # The window, audio, camera and screen capture. Turn off (`--no-default-features`)
 # to build only the host that runs in Docker.
-gui = ["dep:eframe", "dep:egui", "dep:cpal", "dep:xcap", "dep:nokhwa", "dep:winit", "dep:rfd", "dep:if-addrs", "dep:opusic-c", "dep:sonora", "dep:wasapi", "dep:openh264", "dep:openh264-sys2", "dep:bzip2", "dep:nnnoiseless", "dep:arboard"]
+gui = ["dep:eframe", "dep:egui", "dep:cpal", "dep:xcap", "dep:nokhwa", "dep:winit", "dep:rfd", "dep:if-addrs", "dep:opusic-c", "dep:sonora", "dep:wasapi", "dep:openh264", "dep:openh264-sys2", "dep:bzip2", "dep:nnnoiseless", "dep:arboard", "dep:gpu-video"]
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wayland", "x11"], optional = true }
@@ -48,10 +48,15 @@ arboard = { version = "3.7", optional = true }
 
 [dev-dependencies]
 openh264 = { version = "0.9.10", features = ["source"] }
+# Vulkan Video encoder probe (see media::bench::benchmark_vulkan_video_encoder).
+gpu-video = "0.5"
+wgpu = "30"
+pollster = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_System_Console", "Win32_System_DataExchange", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_System_Registry", "Win32_System_Threading"] }
 wasapi = { version = "0.27", optional = true }
+gpu-video = { version = "0.5", optional = true }
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_System_Com_Urlmon", "Win32_Networking_WinInet", "Foundation", "Graphics", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.dev]
