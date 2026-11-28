@@ -1,3 +1,8 @@
+# Lanvox 0.3.4
+
+- Adaptação de vídeo também reduz a resolução quando quem assiste reporta fila ou decodificação congestionada, mantendo o FPS solicitado.
+- Prévia local mais nítida e adaptação do compartilhamento para sustentar 60 FPS.
+
 # Lanvox 0.3.3
 
 ## Compartilhamento de tela

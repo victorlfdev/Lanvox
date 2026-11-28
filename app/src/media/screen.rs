@@ -1060,7 +1060,13 @@ impl ScreenShare {
                             if network_congested && bitrate.target() == bitrate.floor() {
                                 floor_congested_windows += 1;
                             } else { floor_congested_windows = 0; }
-                            let congested = overloaded || floor_congested_windows >= 3;
+                            // A receiver can fall behind even while this machine captures and
+                            // encodes comfortably. Let its decoder/queue feedback lower the
+                            // picture size too; bitrate-only adaptation cannot relieve the
+                            // receiver's per-frame decode and texture-upload cost.
+                            let congested = overloaded
+                                || remote.congested
+                                || floor_congested_windows >= 3;
                             let previous = level;
                             if settings.adaptive && congested {
                                 level = (level + 1).min(MAX_LEVEL);
